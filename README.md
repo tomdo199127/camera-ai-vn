@@ -4,6 +4,26 @@ Hệ thống nhận diện cho camera gia đình, chạy trên một máy Linux 
 
 Mọi xử lý hình ảnh chạy trên máy của bạn. AI trên mạng (OpenRouter) là **tuỳ chọn**, chỉ dùng để đọc lại những biển số khó mà máy không đọc ra.
 
+## Ảnh màn hình
+
+> Biển số trong ảnh demo được che một nửa, ảnh camera ở trang Cảnh báo được làm mờ để bảo vệ quyền riêng tư.
+
+**Biển số**: các xe đã đọc được, kèm ảnh biển cắt ra và nguồn đọc (OCR trên máy, AI đọc, người dùng sửa)
+
+![Trang Biển số](docs/screenshots/bien-so.jpg)
+
+**Chi tiết một biển số**: biểu đồ có mặt theo ngày và lịch trình ra vào
+
+![Chi tiết biển số](docs/screenshots/chi-tiet-bien-so.jpg)
+
+**Cảnh báo**: người vào vùng, người lạ, người quen, ô tô… kèm trạng thái đã gửi Telegram hay chưa
+
+![Trang Cảnh báo](docs/screenshots/canh-bao.jpg)
+
+**Cài đặt**: chọn loại cảnh báo gửi Telegram cho từng camera, khung giờ gửi
+
+![Trang Cài đặt](docs/screenshots/cai-dat.jpg)
+
 ## Tính năng
 
 | Trang | Làm gì |
