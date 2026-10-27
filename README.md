@@ -44,7 +44,7 @@ Camera (RTSP / ONVIF / Xiaomi) ──► go2rtc ──► worker ──► SQLit
 ## Cài đặt
 
 ```bash
-git clone <địa chỉ repo này> ~/lpr-server
+git clone https://github.com/tomdo199127/camera-ai-vn.git ~/lpr-server
 cd ~/lpr-server
 bash deploy/install.sh
 ```
