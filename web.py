@@ -415,7 +415,12 @@ def camera_snapshot(cam: str):
         with urllib.request.urlopen(f"{GO2RTC_API}/api/frame.jpeg?src={cam}", timeout=20) as r:
             return Response(r.read(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
     except Exception as e:
-        return JSONResponse({"error": f"Không lấy được ảnh: {e}"}, status_code=502)
+        error = e
+    # go2rtc tạo ảnh bằng ffmpeg, hay lỗi với H.265 khi chưa có ai xem luồng: đọc thẳng một khung qua RTSP như worker
+    frame = grab_frame(f"rtsp://{RTSP_HOST}/{cam}")
+    if frame is None:
+        return JSONResponse({"error": f"Không lấy được ảnh: {error}"}, status_code=502)
+    return Response(frame_jpeg(frame), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 # ---------- thêm / sửa / xoá camera: mỗi camera là một luồng trong go2rtc ----------
@@ -482,6 +487,13 @@ def grab_frame(url: str, seconds: float = 15):
         cap.release()
 
 
+def frame_jpeg(frame) -> bytes:
+    scale = min(1.0, 1280 / frame.shape[1])
+    if scale < 1:
+        frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    return cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+
+
 def probe_source(source: str) -> bytes:
     """Thử link camera qua go2rtc rồi đọc một khung hình từ RTSP của go2rtc: đúng đường worker sẽ dùng.
     Trả về ảnh JPEG; lỗi thì HTTPException kèm lời giải thích dễ hiểu."""
@@ -501,10 +513,7 @@ def probe_source(source: str) -> bytes:
         if frame is None:
             raise HTTPException(400, "Kết nối được camera nhưng không đọc được hình. Thử luồng phụ, hoặc đổi mã hoá"
                                      " video sang H.264 trong cài đặt camera.")
-        scale = min(1.0, 1280 / frame.shape[1])
-        if scale < 1:
-            frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        return cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+        return frame_jpeg(frame)
     finally:
         try:
             go2rtc_delete(name)
