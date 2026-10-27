@@ -637,6 +637,8 @@ function openCameraForm(cam) {
         </ul>
       </details>
     </form>`;
+  $modal.classList.add("narrow");
+  $modal.addEventListener("close", () => $modal.classList.remove("narrow"), { once: true });
   $modal.showModal();
   const f = document.getElementById("cf");
   const msg = document.getElementById("cf-msg"), snap = document.getElementById("cf-snap");
