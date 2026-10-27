@@ -13,6 +13,7 @@ import subprocess
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
+from urllib.parse import urlsplit
 
 import cv2
 
@@ -236,34 +237,57 @@ def cleanup(conn):
               flush=True)
 
 
-def p2p_streams(previous: set) -> set:
-    """Luồng go2rtc nối kiểu P2P (Xiaomi). Camera RTSP mất hình là do camera, go2rtc tự nối lại."""
+def p2p_streams(previous: dict) -> dict:
+    """{luồng go2rtc nối kiểu P2P (Xiaomi): IP camera}. Camera RTSP mất hình là do camera, go2rtc tự nối lại."""
     sources = go2rtc_sources()
     if sources is None:
         return previous
-    return {name for name, src in sources.items() if any(s.startswith("xiaomi:") for s in src)}
+    return {name: urlsplit(s).hostname for name, src in sources.items() for s in src if s.startswith("xiaomi:")}
+
+
+def pingable(ip: str | None) -> bool:
+    if not ip:
+        return True
+    try:
+        return subprocess.run(["ping", "-c", "2", "-W", "1", ip], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return True  # không ping được vì lý do khác thì coi như camera còn sống, giữ cách cũ
 
 
 class Go2rtcWatchdog:
     """go2rtc đôi khi treo kết nối P2P tới một camera Xiaomi (camera vẫn ping được nhưng không ra hình)
-    và không tự nối lại. Camera P2P nào mất hình quá STALL giây thì khởi động lại go2rtc;
-    nếu camera tắt hẳn thì giãn dần khoảng cách giữa các lần khởi động lại (10 → 20 → … tối đa 120 phút)."""
+    và không tự nối lại. Camera P2P nào mất hình quá STALL giây mà vẫn ping được thì khởi động lại go2rtc;
+    camera tắt nguồn / mất mạng thì bỏ qua, vì khởi động lại go2rtc làm mọi camera khác mất hình vài chục giây.
+    Lần khởi động lại liên tiếp giãn dần (10 → 20 → … tối đa 120 phút)."""
     STALL = 180
 
     def __init__(self):
         self.started = time.time()
         self.last_restart = 0.0
         self.backoff = 600.0
+        self.next_ping = 0.0
+        self.offline = set()
 
-    def check(self, grabbers, now):
+    def check(self, grabbers, ips, now):
         stalled = [cam for cam, g in grabbers.items()
                    if now - max(g.last_frame_at or 0, g.started_at, self.started) > self.STALL]
         if not stalled:
             self.backoff = 600.0
+            self.offline = set()
             return
-        if now - self.last_restart < self.backoff:
+        if now - self.last_restart < self.backoff or now < self.next_ping:
             return
-        print(f"[watchdog] {', '.join(stalled)} mất hình > {self.STALL}s, khởi động lại go2rtc", flush=True)
+        alive = [cam for cam in stalled if pingable(ips.get(cam))]
+        offline = set(stalled) - set(alive)
+        if offline - self.offline:
+            print(f"[watchdog] {', '.join(sorted(offline))} không ping được (tắt nguồn / mất mạng?),"
+                  " không khởi động lại go2rtc", flush=True)
+        self.offline = offline
+        if not alive:
+            self.next_ping = now + 60
+            return
+        print(f"[watchdog] {', '.join(alive)} mất hình > {self.STALL}s, khởi động lại go2rtc", flush=True)
         if self.last_restart:
             self.backoff = min(self.backoff * 2, 7200.0)
         self.last_restart = now
@@ -291,7 +315,7 @@ def main():
     fps_counter = Counter()
     next_camera_sync = next_status = next_cleanup = 0.0
     watchdog = Go2rtcWatchdog()
-    p2p_cams = set()
+    p2p_cams = {}
     print("Worker đã chạy", flush=True)
 
     while True:
@@ -420,7 +444,7 @@ def main():
                 )
             fps_counter.clear()
             conn.commit()
-            watchdog.check({c: g for c, g in grabbers.items() if c in p2p_cams}, now)
+            watchdog.check({c: g for c, g in grabbers.items() if c in p2p_cams}, p2p_cams, now)
             next_status = now + 10
 
         if now >= next_cleanup:
