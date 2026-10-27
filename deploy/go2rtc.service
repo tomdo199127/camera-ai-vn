@@ -1,0 +1,12 @@
+[Unit]
+Description=go2rtc - luồng camera Xiaomi sang RTSP
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/lpr-server/go2rtc
+ExecStart=%h/lpr-server/go2rtc/go2rtc -config %h/lpr-server/go2rtc/go2rtc.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

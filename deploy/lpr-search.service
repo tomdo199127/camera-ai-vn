@@ -1,0 +1,15 @@
+[Unit]
+Description=LPR search - tính vector CLIP cho ảnh người qua lại để tìm theo mô tả
+After=lpr-worker.service
+
+[Service]
+WorkingDirectory=%h/lpr-server
+EnvironmentFile=%h/lpr-server/.env
+ExecStart=%h/lpr-server/.venv/bin/python -W ignore -u search.py
+Restart=always
+RestartSec=10
+# ưu tiên thấp nhất: chỉ dùng CPU khi worker (đọc biển, cảnh báo vùng) rảnh
+Nice=19
+
+[Install]
+WantedBy=default.target

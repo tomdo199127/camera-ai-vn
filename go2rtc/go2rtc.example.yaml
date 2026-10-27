@@ -1,0 +1,22 @@
+# Cấu hình go2rtc: mỗi camera là một "stream", worker đọc hình qua rtsp://127.0.0.1:8554/<tên stream>.
+# install.sh chép file này thành go2rtc.yaml. Camera có RTSP nên thêm trên web (tab Camera → + Thêm camera):
+# go2rtc tự ghi vào go2rtc.yaml. File go2rtc.yaml chứa mật khẩu camera: không chia sẻ, không đưa lên git.
+
+api:
+  listen: "127.0.0.1:1984"   # API / giao diện go2rtc chỉ mở trên máy chủ (xem qua SSH tunnel nếu cần)
+
+rtsp:
+  listen: "127.0.0.1:8554"   # đổi thành ":8554" nếu muốn xem bằng VLC từ máy khác trong mạng
+
+# Có thể sửa tay rồi khởi động lại go2rtc (systemctl --user restart go2rtc). Ví dụ:
+streams:
+  # Dahua / KBVision / Imou (Imou: mật khẩu là Safety code trên tem camera)
+  # cong_truoc: rtsp://admin:matkhau@192.168.1.50:554/cam/realmonitor?channel=1&subtype=0
+  # Hikvision / HiLook / EZVIZ (101 = kênh 1 luồng chính, 102 = luồng phụ)
+  # san: rtsp://admin:matkhau@192.168.1.51:554/Streaming/Channels/101
+  # TP-Link Tapo (dùng "Tài khoản camera" tạo trong app Tapo)
+  # phong_khach: rtsp://taikhoan:matkhau@192.168.1.52:554/stream1
+  # Camera có ONVIF: go2rtc tự tìm link RTSP
+  # kho: onvif://admin:matkhau@192.168.1.53:80
+  # Xiaomi không có RTSP: đăng nhập tài khoản Xiaomi trong giao diện go2rtc (http://127.0.0.1:1984 → Add → Xiaomi),
+  # go2rtc thêm mục "xiaomi:" chứa token và stream dạng xiaomi://… Xem https://github.com/AlexxIT/go2rtc

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1a1d23" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Camera AI">
+  <title>Camera AI</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="icon" href="/static/icons/icon-192.png">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <img class="brand-icon" src="/static/icons/icon-192.png" alt="" width="28" height="28">
+      <span class="brand-name">Camera AI</span>
+      <span class="page-title" id="page-title"></span>
+    </a>
+    <nav class="mainnav">
+      <a href="#/" data-nav="detections">Nhận diện</a>
+      <a href="#/plates" data-nav="plates">Biển số</a>
+      <a href="#/events" data-nav="events">Cảnh báo</a>
+      <a href="#/people" data-nav="people">Khuôn mặt</a>
+      <a href="#/visitors" data-nav="visitors">Qua lại</a>
+      <a href="#/cameras" data-nav="cameras">Camera</a>
+      <a href="#/settings" data-nav="settings">Cài đặt</a>
+    </nav>
+    <button class="ghost logout" data-logout type="button">Đăng xuất</button>
+  </header>
+
+  <main id="view"></main>
+
+  <!-- thanh tab dưới cùng trên điện thoại -->
+  <nav class="tabbar" aria-label="Điều hướng">
+    <a href="#/" data-nav="detections"><svg viewBox="0 0 24 24"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/><rect x="7" y="9" width="10" height="6" rx="1"/></svg><span>Nhận diện</span></a>
+    <a href="#/plates" data-nav="plates"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 12h4M14 12h3"/></svg><span>Biển số</span></a>
+    <a href="#/events" data-nav="events"><svg viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span>Cảnh báo</span></a>
+    <a href="#/visitors" data-nav="visitors"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="17" cy="9" r="2.3"/><path d="M15.5 14.2A4.5 4.5 0 0 1 21 18.5"/></svg><span>Qua lại</span></a>
+    <button type="button" data-more data-nav-more><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg><span>Thêm</span></button>
+  </nav>
+
+  <dialog id="more-sheet" class="sheet">
+    <div class="sheet-grip"></div>
+    <a href="#/people" data-nav="people">Khuôn mặt</a>
+    <a href="#/cameras" data-nav="cameras">Camera</a>
+    <a href="#/settings" data-nav="settings">Cài đặt</a>
+    <button type="button" class="danger-link" data-logout>Đăng xuất</button>
+  </dialog>
+
+  <dialog id="modal">
+    <div id="modal-body"></div>
+  </dialog>
+
+  <!-- xem ảnh lớn ngay trên màn hình đang mở -->
+  <dialog id="viewer" class="viewer"></dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

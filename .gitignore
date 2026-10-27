@@ -1,0 +1,22 @@
+# bí mật / cấu hình riêng của từng máy
+.env
+.ngrok.env
+go2rtc/go2rtc.yaml
+go2rtc/go2rtc.yaml.bak*
+local_routes.py
+
+# tải về lúc cài
+go2rtc/go2rtc
+models/*.onnx
+models/*.data
+models/clip_*
+.venv/
+
+# dữ liệu chạy
+data/
+data.bak/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+.DS_Store

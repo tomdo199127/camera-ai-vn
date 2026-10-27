@@ -1,0 +1,13 @@
+[Unit]
+Description=ngrok - truy cập web camera từ bên ngoài
+After=network-online.target lpr-web.service
+
+[Service]
+# NGROK_DOMAIN=<tên miền tĩnh của tài khoản ngrok>, authtoken nằm trong ~/.config/ngrok/ngrok.yml
+EnvironmentFile=%h/lpr-server/.ngrok.env
+ExecStart=/usr/local/bin/ngrok http --url=${NGROK_DOMAIN} 8080 --config %h/.config/ngrok/ngrok.yml --log stdout
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

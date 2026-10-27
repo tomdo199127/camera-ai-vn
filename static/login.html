@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2459d6">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Camera AI">
+  <title>Đăng nhập · Camera AI</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="icon" href="/static/icons/icon-192.png">
+  <link rel="stylesheet" href="/static/login.css">
+</head>
+<body>
+  <main class="login">
+    <img class="logo" src="/static/icons/icon-192.png" alt="" width="72" height="72">
+    <h1>Camera AI</h1>
+    <p class="sub">Đăng nhập để xem camera và cảnh báo</p>
+    <form id="form" autocomplete="on">
+      <label>Tên đăng nhập
+        <input name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+      </label>
+      <label>Mật khẩu
+        <span class="pw">
+          <input name="password" type="password" autocomplete="current-password" required>
+          <button type="button" class="eye" aria-label="Hiện mật khẩu">Hiện</button>
+        </span>
+      </label>
+      <label class="check"><input type="checkbox" name="remember" checked> Ghi nhớ đăng nhập 30 ngày</label>
+      <p class="error" id="error" role="alert"></p>
+      <button class="primary" type="submit">Đăng nhập</button>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById("form");
+    const err = document.getElementById("error");
+    const eye = form.querySelector(".eye");
+    eye.onclick = () => {
+      const pw = form.password;
+      pw.type = pw.type === "password" ? "text" : "password";
+      eye.textContent = pw.type === "password" ? "Hiện" : "Ẩn";
+    };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      const btn = form.querySelector(".primary");
+      btn.disabled = true; btn.textContent = "Đang đăng nhập…";
+      try {
+        const r = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: form.username.value, password: form.password.value, remember: form.remember.checked }),
+        });
+        if (!r.ok) {
+          let msg = "Không đăng nhập được";
+          try { msg = (await r.json()).detail || msg; } catch {}
+          throw new Error(msg);
+        }
+        location.replace("/" + (sessionStorage.getItem("afterLogin") || ""));
+      } catch (ex) {
+        err.textContent = ex.message;
+        form.password.select();
+      } finally {
+        btn.disabled = false; btn.textContent = "Đăng nhập";
+      }
+    };
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+  </script>
+</body>
+</html>

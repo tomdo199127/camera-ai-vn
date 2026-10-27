@@ -1,0 +1,15 @@
+[Unit]
+Description=LPR worker - nhận diện biển số
+After=go2rtc.service
+Wants=go2rtc.service
+
+[Service]
+WorkingDirectory=%h/lpr-server
+EnvironmentFile=%h/lpr-server/.env
+ExecStart=%h/lpr-server/.venv/bin/python -W ignore -u worker.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target

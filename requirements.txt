@@ -1,0 +1,15 @@
+# rapidocr_onnxruntime cài riêng với --no-deps (nó kéo opencv-python bản GUI, xung đột với bản headless)
+numpy==2.5.4
+onnxruntime==1.31.0
+opencv-python-headless==5.0.0.93
+open-image-models==0.6.0
+pillow==13.0.0
+pyclipper==1.4.0
+PyYAML==6.0.3
+shapely==2.2.0
+six==1.17.0
+tqdm==4.70.1
+rich==15.0.0
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+httpx==0.28.1

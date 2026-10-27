@@ -1,0 +1,13 @@
+[Unit]
+Description=LPR web - quản lý biển số
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/lpr-server
+EnvironmentFile=%h/lpr-server/.env
+ExecStart=%h/lpr-server/.venv/bin/uvicorn web:app --host 0.0.0.0 --port ${WEB_PORT}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
