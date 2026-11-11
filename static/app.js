@@ -186,7 +186,8 @@ let curPage = "", prevPage = "";
 async function route() {
   const gen = ++routeGen;
   const page = location.hash.split("?")[0];
-  if (page !== curPage) { prevPage = curPage; curPage = page; }
+  const changed = page !== curPage;
+  if (changed) { prevPage = curPage; curPage = page; }
   pageAbort.abort();
   pageAbort = new AbortController();
   clearInterval(refreshTimer);
@@ -214,6 +215,11 @@ async function route() {
     $view.innerHTML = `<div class="empty">${first ? "Tài khoản của bạn không được mở trang này." : "Tài khoản của bạn chưa được cấp quyền mở trang nào. Nhờ admin cấp quyền."}</div>`;
     return;
   }
+  // đổi trang mà trang mới tải lâu (mạng chậm, máy chủ bận): đừng để nội dung trang cũ dưới tiêu đề mới
+  const oldContent = changed ? $view.firstChild : null;
+  const loading = oldContent && setTimeout(() => {
+    if (gen === routeGen && $view.firstChild === oldContent) $view.innerHTML = `<div class="empty">Đang tải…</div>`;
+  }, 300);
   if (!cameras.length) cameras = await api("/api/cameras").catch(() => []);
   if (gen !== routeGen) return;
   try {
@@ -229,6 +235,8 @@ async function route() {
     else $view.innerHTML = `<div class="empty">Không tìm thấy trang</div>`;
   } catch (e) {
     if (gen === routeGen) $view.innerHTML = `<div class="empty">Lỗi tải dữ liệu: ${esc(e.message)}</div>`;
+  } finally {
+    clearTimeout(loading);
   }
 }
 window.addEventListener("hashchange", route);

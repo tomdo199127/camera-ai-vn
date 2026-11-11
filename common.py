@@ -261,6 +261,9 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_maybe ON visits(maybe_visitor)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_noclip ON visits(ts) WHERE clip_emb IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_noclip ON events(ts) WHERE clip_emb IS NULL AND kind = 'zone'")
+    # lượt chờ AI so người: ít dòng, khỏi đọc cả bảng visits (mỗi dòng > 2 KB) trên ổ đang bận ghi video
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_pending ON visits(maybe_visitor)"
+                 " WHERE maybe_visitor IS NOT NULL AND ai_verdict IS NULL")
     conn.commit()
     conn.close()
 

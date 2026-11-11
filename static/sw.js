@@ -1,6 +1,6 @@
 // Service worker: chỉ giữ "vỏ" ứng dụng để mở nhanh và mở được khi mạng chập chờn.
 // Dữ liệu (/api) và ảnh (/images) luôn lấy mới từ server, không cache.
-const CACHE = "camera-ai-v19";
+const CACHE = "camera-ai-v20";
 const SHELL = ["/", "/static/app.js", "/static/style.css", "/static/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {

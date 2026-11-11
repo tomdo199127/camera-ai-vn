@@ -1121,7 +1121,8 @@ def list_events(kind: str = "", camera: str = "", person_id: int | None = None, 
         where.append("e.person_id = ?")
         args.append(person_id)
     if unknown:
-        where.append("e.kind = 'face' AND e.person_id IS NULL")
+        # "+": đi theo idx_events_kind (chỉ khuôn mặt) thay vì idx_events_person (mọi cảnh báo vùng cũng có person_id NULL)
+        where.append("e.kind = 'face' AND +e.person_id IS NULL")
     sql_where = " AND ".join(where) + cam_in("e.camera")
     if q.strip():
         return search_events(q.strip(), sql_where, args, min(limit, 500), max(0, offset))
@@ -1214,7 +1215,7 @@ def assign_event(eid: int, body: AssignIn):
     # các lần "người lạ" khác có khuôn mặt giống -> gắn luôn cho người này
     emb = from_blob(ev["embedding"])
     same = [eid] + [r["id"] for r in db.execute(
-        "SELECT id, embedding FROM events WHERE kind = 'face' AND person_id IS NULL AND id != ? AND embedding IS NOT NULL",
+        "SELECT id, embedding FROM events WHERE kind = 'face' AND +person_id IS NULL AND id != ? AND embedding IS NOT NULL",
         (eid,)) if float(from_blob(r["embedding"]) @ emb) >= FACE_MATCH]
     db.executemany("UPDATE events SET person_id = ?, label = ? WHERE id = ?", [(pid, person["name"], i) for i in same])
     db.commit()
@@ -2097,7 +2098,8 @@ def ai_settings(s):
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     visits = dict(db.execute("SELECT ai_verdict, COUNT(*) FROM visits WHERE ts >= ? AND ai_verdict IS NOT NULL"
                              " GROUP BY ai_verdict", (today,)).fetchall())
-    merged = db.execute("SELECT COUNT(*) FROM visits WHERE ts >= ? AND ai_verdict = 'same' AND maybe_visitor IS NULL"
+    # "+": không để SQLite chọn idx_visits_maybe (gần hết bảng có maybe_visitor NULL, đọc cả bảng); chỉ xét hôm nay
+    merged = db.execute("SELECT COUNT(*) FROM visits WHERE ts >= ? AND ai_verdict = 'same' AND +maybe_visitor IS NULL"
                         " AND ai_conf >= ?", (today, ai.MERGE_CONF)).fetchone()[0]
     plates = dict(db.execute("SELECT ai_status, COUNT(*) FROM sightings WHERE first_seen >= ? AND ai_status IS NOT NULL"
                              " GROUP BY ai_status", (today,)).fetchall())
