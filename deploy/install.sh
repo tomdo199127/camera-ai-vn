@@ -16,14 +16,18 @@ if [ "$(id -u)" = 0 ]; then
   exit 1
 fi
 
+# sudo hỏi mật khẩu qua terminal (khi chạy qua curl | bash thì stdin là nội dung script, không đọc từ đó được)
+TTY=/dev/tty
+{ : < /dev/tty; } 2>/dev/null || TTY=/dev/null
+
 # --- gói hệ thống ---
 missing=()
 for c in git curl ffmpeg python3; do command -v "$c" >/dev/null || missing+=("$c"); done
 if [ ${#missing[@]} -gt 0 ]; then
   if command -v apt-get >/dev/null && command -v sudo >/dev/null; then
     echo "Cài gói còn thiếu: ${missing[*]} (cần mật khẩu sudo)"
-    sudo apt-get update -qq < /dev/tty
-    sudo apt-get install -y "${missing[@]}" < /dev/tty
+    sudo apt-get update -qq < "$TTY"
+    sudo apt-get install -y "${missing[@]}" < "$TTY"
   else
     echo "Thiếu: ${missing[*]}. Cài các gói này rồi chạy lại."
     exit 1
@@ -93,7 +97,7 @@ systemctl --user --no-pager status $UNITS | grep -E "●|Active:" || true
 if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
   echo
   echo "Bật tự chạy sau khi khởi động máy (cần mật khẩu sudo):"
-  if ! sudo loginctl enable-linger "$USER" < /dev/tty; then
+  if ! sudo loginctl enable-linger "$USER" < "$TTY"; then
     echo "  Chưa bật được. Tự chạy một lần: sudo loginctl enable-linger $USER"
   fi
 fi
