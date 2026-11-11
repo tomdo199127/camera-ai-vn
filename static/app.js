@@ -2194,9 +2194,15 @@ async function viewPlayback() {
     const L = live;
     live = null;
     clearInterval(liveTimer);
+    L.player.stop();  // trước mọi thao tác giao diện: lỗi ở đó không được để luồng chạy ngầm mãi
+    if (!document.body.contains(liveV)) {  // trang đã bị thay: chỉ tắt luồng và micro
+      const T = talk;
+      talk = null;
+      if (T) { T.ws?.close(); T.stream?.getTracks().forEach((t) => t.stop()); T.ctx?.close(); }
+      return;
+    }
     stopTalk();
     $("pb-talk").hidden = true;
-    L.player.stop();
     $("pb-screen").classList.remove("live");
     $("pb-live").classList.remove("on");
     for (const id of ["pb-back", "pb-fwd", "pb-speed"]) $(id).disabled = false;
@@ -2205,6 +2211,7 @@ async function viewPlayback() {
     syncPlayBtn();
   }
   liveV.onplay = liveV.onpause = () => { if (live) syncPlayBtn(); };
+  leavePage = () => stopLive();  // chuyển trang: ngắt luồng trực tiếp (và micro) ngay
 
   // ---- nói qua loa camera (khi xem trực tiếp camera có loa) ----
   // Bấm 🎙 để bật micro, bấm lần nữa để tắt. Trong lúc nói thì tắt tiếng camera trên web, không thì tiếng từ loa
@@ -2363,11 +2370,28 @@ function playLiveOnce(v, cam, { onMsg = () => {}, play, quality = "" }, onLost, 
     return { stop() {}, ok: () => false };
   }
   // target: độ đệm giữ lại (giây). Bắt đầu 1 s; mỗi lần hết đệm phải chờ (mạng camera về từng cụm) thì nới thêm,
-  // tối đa 3 s: trễ hơn chút nhưng không giật hình / tiếng. Chạy êm 30 s liền thì thu lại 0,5 s (tối thiểu 1 s), để
-  // camera Wi-Fi yếu không kẹt mãi ở 3 s sau vài lần khựng; đổi lại thỉnh thoảng khựng nhẹ rồi nới lại.
+  // tối đa 3 s: trễ hơn chút nhưng không giật hình / tiếng. Chạy êm CALM_MS liền mới thu lại 0,25 s (tối thiểu 1 s).
+  // Camera Wi-Fi yếu về chậm từng cụm 0,3–0,7 s khoảng mỗi phút: thu sau 30 s như trước thì cụm sau lại rơi đúng
+  // lúc đệm vừa bị thu nên giật lặp lại; camera dây không khựng nên vẫn về 1 s.
+  const CALM_MS = 120000;
   const ms = new MS(), L = { sb: null, ws: null, queue: [], stopped: false, playing: false, target: 1, fast: false, fatal: false, calm: 0 };
   const ac = new AbortController();
-  v.addEventListener("waiting", () => { if (L.playing) { L.target = Math.min(3, L.target + 0.5); L.calm = performance.now(); } }, { signal: ac.signal });
+  v.addEventListener("waiting", () => {
+    if (!L.playing || skipGap()) return;  // đứng ở lỗ (camera bỏ khung) thì chỉ nhảy qua, không phải thiếu đệm
+    L.target = Math.min(3, L.target + 0.5);
+    L.calm = performance.now();
+  }, { signal: ac.signal });
+  // camera bỏ mất khung (Wi-Fi) thành lỗ trong bộ đệm; Safari đứng hình ở mép lỗ chứ không tự nhảy như Chrome
+  function skipGap() {
+    const b = v.buffered, t = v.currentTime;
+    for (let i = 0; i < b.length - 1; i++) {
+      if (t >= b.end(i) - 0.15 && t < b.start(i + 1)) {
+        v.currentTime = b.start(i + 1) + 0.01;
+        return true;
+      }
+    }
+    return false;
+  }
   say("Đang kết nối camera…");
   ms.addEventListener("sourceopen", () => {
     if (L.stopped) return;
@@ -2399,7 +2423,9 @@ function playLiveOnce(v, cam, { onMsg = () => {}, play, quality = "" }, onLost, 
   // nối dữ liệu mới vào bộ đệm; bỏ phần đã xem, tụt lại quá xa thì nhảy tới
   function feed() {
     const sb = L.sb;
-    if (L.stopped || !sb || sb.updating) return;
+    if (L.stopped || !sb) return;
+    if (L.playing) skipGap();  // mỗi lần có dữ liệu (~5 lần / giây): đứng ở lỗ không quá ~0,2 s
+    if (sb.updating) return;
     if (L.queue.length) {
       const data = new Uint8Array(L.queue.reduce((n, b) => n + b.byteLength, 0));
       let o = 0;
@@ -2413,8 +2439,8 @@ function playLiveOnce(v, cam, { onMsg = () => {}, play, quality = "" }, onLost, 
     if (end - start > 30) return sb.remove(start, end - 10);
     // lúc mới vào bỏ qua phần dồn sẵn; tụt quá xa thì nhảy tới; tụt hơn 1 s thì phát nhanh hơn rất ít (tiếng không méo)
     const lag = end - v.currentTime;
-    if (L.playing && L.target > 1 && performance.now() - L.calm > 30000) {
-      L.target = Math.max(1, L.target - 0.5);
+    if (L.playing && L.target > 1 && performance.now() - L.calm > CALM_MS) {
+      L.target = Math.max(1, L.target - 0.25);
       L.calm = performance.now();
     }
     if (!L.playing || v.currentTime < start || lag > L.target + 3) v.currentTime = Math.max(start, end - L.target);
