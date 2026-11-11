@@ -28,13 +28,14 @@ Mọi xử lý hình ảnh chạy trên máy của bạn. AI trên mạng (OpenR
 
 | Trang | Làm gì |
 |---|---|
-| **Nhận diện** | Dòng thời gian mọi thứ hệ thống thấy: biển số, người quen, người lạ, cảnh báo vùng |
-| **Biển số** | Danh sách xe theo biển (xe máy 2 dòng, ô tô), lịch sử ra vào của từng xe, sửa biển đọc sai, đánh dấu biển cần **theo dõi** (báo Telegram mỗi lần xuất hiện) |
-| **Cảnh báo** | Vẽ vùng trên hình camera, báo khi có người / xe máy / ô tô đi vào, theo khung giờ |
+| **Xem** | Lưới xem trực tiếp mọi camera vừa khít màn hình, phóng to một camera, toàn màn hình; chế độ TV (`?tv=1`) điều khiển bằng phím mũi tên trên remote |
+| **Nhận diện** | Dòng thời gian mọi thứ hệ thống thấy: biển số, người quen, người lạ, cảnh báo vùng. Danh sách xe theo biển (xe máy 2 dòng, ô tô), lịch sử ra vào của từng xe, sửa biển đọc sai, đánh dấu biển cần **theo dõi** (báo Telegram mỗi lần xuất hiện) |
+| **Cảnh báo** | Vẽ vùng trên hình camera, báo khi có người / xe máy / ô tô / chó mèo đi vào, theo khung giờ. Tìm theo mô tả: “áo trắng”, “ô tô đỏ”, “nữ”, “con chó” |
 | **Khuôn mặt** | Thêm ảnh người nhà để nhận ra; người lạ được gom lại để đặt tên sau |
-| **Qua lại** | Gom các lần **cùng một người** đi qua (kể cả khi không thấy mặt), tìm theo mô tả: “áo trắng”, “áo xanh GSM”, “xe máy vàng”, “mũ bảo hiểm đỏ” |
+| **Xem lại** | Ghi hình liên tục (file 1 phút, chép nguyên luồng nên gần như không tốn CPU), xem lại trên web / điện thoại với thanh thời gian kéo để tua như app camera, nút **Trực tiếp** xem luồng camera ngay trên trang (độ trễ ~1–2 giây, có tiếng), phát liền mạch qua các phút, lưới ảnh thu nhỏ theo giờ → phút đánh dấu phút có nhiều thay đổi, tua nhanh tới 16×, tải đoạn video; mở thẳng video từ một lần nhận diện / cảnh báo |
 | **Camera** | Thêm camera ngay trên web (có hướng dẫn lấy link RTSP từng hãng), bật / tắt tính năng cho từng camera |
-| **Cài đặt** | Telegram, giờ gửi cảnh báo, AI, thiết bị đang đăng nhập |
+| **Cài đặt** | Telegram, giờ gửi cảnh báo, dung lượng tối đa cho video ghi hình, AI, thiết bị đang đăng nhập |
+| **Người dùng** | Tài khoản cho người nhà, chọn trang và camera mỗi người được xem; xem thiết bị đang đăng nhập, đăng xuất từ xa hoặc khoá |
 
 Camera dùng được: mọi camera có **RTSP** hoặc **ONVIF**, như Dahua, KBVision, Imou, Hikvision, HiLook, EZVIZ, TP-Link Tapo / VIGI, Reolink, Uniview, kể cả qua đầu ghi. Camera **Xiaomi** dùng được qua [go2rtc](https://github.com/AlexxIT/go2rtc) (đăng nhập tài khoản Xiaomi, xem cuối mục *Thêm camera*).
 
@@ -51,45 +52,48 @@ Camera (RTSP / ONVIF / Xiaomi) ──► go2rtc ──► worker ──► SQLit
 
 - `go2rtc` nhận hình từ camera và phát lại thành RTSP nội bộ, nên mọi hãng camera đều đi chung một đường.
 - `worker` chỉ chạy AI khi khung hình có chuyển động, nên camera đứng yên gần như không tốn CPU.
-- Năm dịch vụ systemd (chạy bằng user thường, không cần quyền root): `go2rtc`, `lpr-worker`, `lpr-web`, `lpr-ai`, `lpr-search`.
+- `recorder` ghi các camera bật "Ghi hình" bằng ffmpeg, chép nguyên luồng (không nén lại) thành file MP4 1 phút trong `LPR_REC_DIR` (mặc định `<LPR_DATA_DIR>/recordings`); vượt dung lượng đặt trong Cài đặt thì xoá file cũ nhất. Mỗi file ghi xong được làm 1 ảnh thu nhỏ (`HH-MM-SS.jpg`, khung thay đổi nhiều nhất) và đo mức thay đổi (`motion.json`), chỉ giải mã khung khoá nên tốn khoảng 1 giây CPU mỗi phút video. Tiếng camera Xiaomi qua go2rtc là 16 kHz nhưng bị khai là 8 kHz; recorder so độ dài tiếng với hình lúc bắt đầu ghi và tự đặt lại tần số cho khớp; khi camera rớt mạng, recorder chèn khoảng lặng cho tiếng (dựa theo giờ nhận gói) để tiếng không đi sớm hơn hình. Video H.265 xem được trên Safari (iPhone, Mac) và Chrome / Edge (Android, Windows, Mac).
+- Sáu dịch vụ systemd (chạy bằng user thường, không cần quyền root): `go2rtc`, `lpr-worker`, `lpr-web`, `lpr-ai`, `lpr-search`, `lpr-recorder`.
 
 ## Yêu cầu
 
 - Máy Linux chạy liên tục: **Ubuntu 20.04 trở lên** hoặc Debian, CPU **x86_64** (máy ảo cũng được). Script cài có hỗ trợ ARM64 (Raspberry Pi 5, mini PC ARM) nhưng chưa được thử thực tế.
-- Tham khảo thực tế: 5 camera trên máy ảo **4 nhân, 8 GB RAM**. Máy chạy gần hết CPU lúc đông người, xe qua lại, nên dùng từ 4 nhân trở lên, nhiều camera thì cần mạnh hơn.
-- Ổ đĩa: khoảng 3 GB cho phần mềm và model, cộng phần ảnh lưu lại (mặc định giới hạn 1 GB, chỉnh được).
+- Tham khảo thực tế: 5 camera (3 camera cổng đọc biển số, ghi hình cả 5) trên máy ảo **8 nhân (i7-8700), 10 GB RAM** dùng trung bình khoảng 35% CPU. Máy 4 nhân chạy được nhưng gần hết CPU lúc đông người, xe qua lại; nên dùng từ 4 nhân trở lên, nhiều camera thì cần mạnh hơn.
+- Ổ đĩa: khoảng 3 GB cho phần mềm và model, cộng phần ảnh lưu lại (mặc định giới hạn 1 GB, chỉnh được). Ghi hình thì cần thêm chỗ cho video: camera 4MP H.265 khoảng 10–45 GB mỗi ngày tuỳ bitrate (camera Xiaomi 2K đo được ~14 GB/ngày).
 - Máy chủ **cùng mạng** với camera (hoặc nối VPN tới mạng camera).
-- Nên cài `ffmpeg` để tab Camera hiện được ảnh chụp: `sudo apt install ffmpeg`.
+- Cài `ffmpeg` (`sudo apt install ffmpeg`): cần cho ghi hình, và để tab Camera hiện được ảnh chụp.
 
 ## Cài đặt
 
+Trên máy chủ Ubuntu / Debian, đăng nhập bằng user thường (không dùng root) và chạy **một lệnh**:
+
 ```bash
-git clone https://github.com/tomdo199127/camera-ai-vn.git ~/lpr-server
-cd ~/lpr-server
-bash deploy/install.sh
+curl -fsSL https://raw.githubusercontent.com/tomdo199127/camera-ai-vn/main/deploy/install.sh | bash
 ```
 
 Script sẽ:
-1. Cài [uv](https://github.com/astral-sh/uv), Python 3.12 và các thư viện vào `.venv` (không đụng tới Python của hệ thống).
-2. Tải go2rtc và các model AI (`scripts/download_models.sh`). Bước xuất model YOLO tải PyTorch bản CPU khoảng 1 GB vào thư mục tạm rồi xoá đi, mất vài phút, chỉ làm lần đầu.
-3. Tạo `.env` và `go2rtc/go2rtc.yaml` từ file mẫu.
-4. Bật và chạy các dịch vụ.
+1. Cài gói hệ thống còn thiếu (`git`, `curl`, `ffmpeg`, `python3`). Bước này hỏi mật khẩu sudo.
+2. Tải mã nguồn về `~/lpr-server`.
+3. Cài [uv](https://github.com/astral-sh/uv), Python 3.12 và các thư viện vào `.venv`, không đụng tới Python của hệ thống.
+4. Tải go2rtc và các model AI (`scripts/download_models.sh`). Bước xuất model YOLO tải PyTorch bản CPU khoảng 1 GB vào thư mục tạm rồi xoá đi. Bước này mất vài phút và chỉ làm lần đầu.
+5. Tạo `.env` và `go2rtc/go2rtc.yaml` từ file mẫu, rồi bật và chạy 6 dịch vụ.
+6. Bật tự chạy sau khi khởi động máy (`loginctl enable-linger`, hỏi sudo).
 
-Để hệ thống vẫn chạy khi bạn đăng xuất và tự chạy lại sau khi khởi động máy, chạy **một lần**:
+Cài xong, mở web tại `http://<IP máy chủ>:8080` và đăng nhập bằng tài khoản mặc định:
 
-```bash
-sudo loginctl enable-linger $USER
-```
+| Tài khoản | Mật khẩu |
+|---|---|
+| `admin` | `123456Aa@` |
 
-Mở web tại `http://<IP máy chủ>:8080` và đăng nhập bằng tài khoản mặc định **`admin` / `123456Aa@`**.
-
-> **Đổi mật khẩu ngay sau khi cài**, nhất là trước khi mở cho xem từ xa: sửa dòng `WEB_PASSWORD` trong `~/lpr-server/.env`, rồi chạy `systemctl --user restart lpr-web`. Ai biết mật khẩu mặc định đều xem được camera của bạn.
+> **Đổi mật khẩu ngay sau khi đăng nhập lần đầu** (menu **Thêm → Đổi mật khẩu**), nhất là trước khi mở cho xem từ xa. Ai biết mật khẩu mặc định đều xem được camera của bạn. Thêm tài khoản cho người nhà ở **Thêm → Người dùng**: chọn được trang và camera mỗi người được xem.
 
 Nếu máy bật tường lửa `ufw`, mở cổng web cho mạng trong nhà:
 
 ```bash
 sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp
 ```
+
+Muốn tự tải mã về trước thì `git clone https://github.com/tomdo199127/camera-ai-vn.git ~/lpr-server` rồi chạy `bash ~/lpr-server/deploy/install.sh`, kết quả như nhau.
 
 ## Thêm camera
 
@@ -148,11 +152,11 @@ Không nên mở cổng trên router. Hai cách an toàn:
 ## Vận hành
 
 ```bash
-# cập nhật lên bản mới (cấu hình, dữ liệu, camera giữ nguyên)
-cd ~/lpr-server && git pull && bash deploy/install.sh
+# cập nhật lên bản mới (cấu hình, dữ liệu, camera giữ nguyên): chạy lại đúng lệnh cài
+curl -fsSL https://raw.githubusercontent.com/tomdo199127/camera-ai-vn/main/deploy/install.sh | bash
 
 # xem trạng thái, nhật ký
-systemctl --user status go2rtc lpr-worker lpr-web lpr-ai lpr-search
+systemctl --user status go2rtc lpr-worker lpr-web lpr-ai lpr-search lpr-recorder
 journalctl --user -u lpr-worker -f
 ```
 

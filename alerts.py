@@ -2,6 +2,7 @@
 
 import json
 import os
+import urllib.parse
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -116,6 +117,12 @@ def clock(now):
     return datetime.fromtimestamp(now).strftime("%H:%M:%S %d/%m")
 
 
+def playback_url(cam, t):
+    """Địa chỉ mở video đúng lúc sự việc (lùi vài giây để thấy cả lúc đi tới); None nếu chưa khai báo địa chỉ web."""
+    base = os.environ.get("LPR_PUBLIC_URL", "").rstrip("/")
+    return f"{base}/#/playback?camera={urllib.parse.quote(cam)}&t={int(t) - 5}" if base else None
+
+
 # thời gian chờ mặc định giữa 2 tin cùng loại (giây), người dùng chỉnh trong trang Cài đặt
 DEFAULT_COOLDOWN = {"camera": 120, "unknown": 0, "watch": 300}
 
@@ -142,8 +149,8 @@ class NotifyPolicy:
         return (self.settings.get(f"{prefix}_start", ""), self.settings.get(f"{prefix}_end", ""),
                 int(cooldown) if cooldown not in (None, "") else DEFAULT_COOLDOWN[mode])
 
-    def send(self, cam, mode, key, now, text, photo, times=None, enabled=True):
-        """Gửi nếu được phép. Trả (đã gửi?, lý do không gửi)."""
+    def send(self, cam, mode, key, now, text, photo, times=None, enabled=True, at=None):
+        """Gửi nếu được phép. at = lúc sự việc xảy ra nếu khác now. Trả (đã gửi?, lý do không gửi)."""
         if mode not in self.matrix.get(cam, ()):
             return False, "Camera không bật gửi loại thông báo này"
         if not enabled:
@@ -153,7 +160,7 @@ class NotifyPolicy:
             return False, f"Ngoài khung giờ gửi ({start}–{end})"
         if now - self.last_sent.get(key, -1e12) < cooldown:
             return False, f"Đang trong thời gian chờ {cooldown} giây"
-        if not self.notifier.send(text, photo):
+        if not self.notifier.send(text, photo, playback_url(cam, at or now)):
             return False, "Chưa cài đặt Telegram"
         self.last_sent[key] = now
         return True, ""
@@ -171,6 +178,7 @@ class ZoneMonitor:
     PARKED_AFTER = 60     # có mặt liên tục bao lâu thì coi là đứng yên
     BASELINE = 20
     STALL = 25            # không có khung nào lâu hơn (khung định kỳ là 10 s) = mất luồng / vừa khởi động
+    ONE_FRAME_CONF = 0.6  # vùng trong cài đặt zone_one_frame: người chắc từ mức này thì báo ngay từ 1 khung
 
     def __init__(self, conn, policy, camera_names):
         self.conn, self.policy, self.camera_names = conn, policy, camera_names
@@ -181,10 +189,12 @@ class ZoneMonitor:
 
     def load(self, settings, matrix):
         self.zones.clear()
+        one_frame = set(filter(None, settings.get("zone_one_frame", "").split(",")))
         for r in self.conn.execute("SELECT * FROM zones WHERE enabled = 1"):
             z = dict(r)
             z["points"] = np.array(json.loads(z["points"]), np.float32)
             z["classes"] = set(filter(None, z["classes"].split(",")))
+            z["one_frame"] = str(z["id"]) in one_frame
             if len(z["points"]) >= 3 and z["classes"]:
                 self.zones[z["camera"]].append(z)
         # chế độ "toàn bộ camera": mỗi camera được chọn có thêm một vùng ảo phủ cả khung hình
@@ -226,7 +236,8 @@ class ZoneMonitor:
                 p[0], p[1] = box, now
                 p[2] += 1
                 # cần thấy ở 2 khung liên tiếp để tránh báo nhầm do bóng / nhiễu
-                if p[2] >= 2 and not p[3]:
+                sure = z.get("one_frame") and group == "person" and conf >= self.ONE_FRAME_CONF
+                if (p[2] >= 2 or sure) and not p[3]:
                     p[3] = True
                     if not quiet:
                         new.append((group, conf, box))

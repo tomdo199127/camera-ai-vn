@@ -10,16 +10,18 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import cv2
 
 import alerts
 from alerts import FaceMonitor, MotionGate, NotifyPolicy, ZoneMonitor, clock
-from common import IMAGES_DIR, RTSP_HOST, go2rtc_sources, connect, get_settings, init_db, notify_matrix
+from common import GO2RTC_API, IMAGES_DIR, RTSP_HOST, go2rtc_sources, connect, get_settings, init_db, notify_matrix
 from notify import Notifier
 from plates import plate_key, plate_tail
 from recognizer import PlateReader, StreamGrabber, iou, vehicle_regions
@@ -39,6 +41,16 @@ FULL_SCAN_EVERY = float(os.environ.get("LPR_FULL_SCAN_EVERY", 20))
 # xe đứng yên (vùng không đổi) chỉ quét lại sau chừng này giây; phải đủ ngắn để xe đỗ vẫn đọc được VOTES lần
 # trong VOTE_WINDOW giây và lần đi qua của biển không bị coi là đã kết thúc (PlatePass.GAP)
 STATIC_RESCAN = 4
+# camera ưu tiên được nhiều lượt xử lý hơn trong mỗi vòng: "camera:số lượt,…", camera không ghi = 1 lượt.
+# Ghi tên mà không ghi số lượt = xen sau mỗi camera thường như cách cũ. Để trống = chia đều.
+PRIORITY_CAMS: dict[str, int | None] = {}
+for _item in filter(None, os.environ.get("LPR_PRIORITY_CAMS", "").split(",")):
+    _cam, _, _weight = _item.strip().partition(":")
+    PRIORITY_CAMS[_cam] = max(1, int(_weight)) if _weight.strip().isdigit() else None
+# xe đỗ đã biết biển thì không đọc lại (ParkedCars)
+PARKED_RECENT = 300   # biển đã biết phải được thấy ở chỗ đó trong chừng này giây gần đây
+PARKED_STAY = 60      # lần xuất hiện OCR xác nhận kéo dài từ chừng này mới tính là xe đỗ
+PARKED_LOST = 20      # các khung đã xử lý không còn thấy xe đúng chỗ quá lâu (và ít nhất 3 khung) = xe đã đi
 
 
 class Track:
@@ -119,17 +131,134 @@ class PlatePass:
         return self.hits >= 2 or self.on_vehicle
 
 
-def scan_regions(scanned, dets, frame, now):
-    """Vùng quanh xe cần tìm biển trong khung này; bỏ qua xe đứng yên vừa quét chưa lâu.
+class ParkedCars:
+    """Xe đỗ đã biết biển thì không quét biển xe đó nữa khi xe vẫn đứng yên đúng chỗ. Trước đây cứ vài giây lại đọc
+    lại, mỗi lần lỡ mất dấu biển quá PlatePass.GAP lại thành một ảnh chờ AI mới (cả nghìn ảnh một ngày).
+
+    Biển đã biết: lần xuất hiện OCR xác nhận kéo dài ở một chỗ, hoặc ảnh chờ AI đã nhận là xe đỗ có biển. Biển chỉ được
+    gắn với xe YOLO thấy đứng yên từ trước lúc biển được thấy lần cuối, nên xe khác đến đỗ đúng chỗ đó sau khi xe cũ đi
+    vẫn được đọc như thường. Xe xê dịch, rời đi, hay có xe khác che chỗ biển thì quên biển đó và đọc lại."""
+    STILL_IOU = 0.85
+    STILL_FOR = 5      # xe phải đứng yên ít nhất chừng này giây (xe chạy ngang trước xe đỗ không tính)
+
+    def __init__(self):
+        self.still = defaultdict(list)   # camera -> [{box, since, seen, missing_since, missed}] xe đứng yên
+        self.known = defaultdict(list)   # camera -> [{plate, bbox, seen, sighting_id, car}]
+
+    def load(self, conn, cams, now):
+        for cam in list(self.known):
+            if cam not in cams:
+                self.known.pop(cam, None), self.still.pop(cam, None)
+        rows = conn.execute(
+            "SELECT camera, COALESCE(corrected_plate, plate) AS plate, bbox, last_seen, id FROM sightings"
+            " WHERE last_seen > ? AND last_seen - first_seen >= ? AND bbox != ''"
+            " UNION ALL SELECT camera, ai_plate, bbox, last_seen, NULL FROM plate_candidates"
+            " WHERE status = 'parked' AND ai_plate != '' AND last_seen > ? AND bbox != ''",
+            (now - PARKED_RECENT, PARKED_STAY, now - PARKED_RECENT)).fetchall()
+        for r in rows:
+            if r["camera"] not in cams:
+                continue
+            box = json.loads(r["bbox"])
+            k = next((k for k in self.known[r["camera"]] if iou(k["bbox"], box) > 0.5), None)
+            if k is None:
+                self.known[r["camera"]].append({"plate": r["plate"], "bbox": box, "seen": r["last_seen"],
+                                                "sighting_id": r["id"], "car": None})
+            elif k["car"] is None and r["last_seen"] > k["seen"]:
+                k.update(plate=r["plate"], bbox=box, seen=r["last_seen"], sighting_id=r["id"] or k["sighting_id"])
+        for items in self.known.values():
+            items[:] = [k for k in items if k["car"] is not None or now - k["seen"] < PARKED_RECENT]
+
+    def _owner(self, still, bbox, now):
+        """Xe đứng yên mang biển này: tâm biển nằm trong khung xe (biển có thể lòi xuống dưới chút), gần đáy xe nhất."""
+        cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+        owners = [s for s in still if now - s["since"] >= self.STILL_FOR and s["box"][0] <= cx <= s["box"][2] and s["box"][1] <= cy
+                  <= s["box"][3] + (s["box"][3] - s["box"][1]) * 0.2]
+        # xe đang thấy được trước xe vừa mất dấu (xe xê dịch sang chỗ mới thì nhận ra ngay)
+        return min(owners, key=lambda s: (s["missing_since"] is not None, abs(s["box"][3] - cy) / (s["box"][3] - s["box"][1])),
+                   default=None)
+
+    def update(self, cam, dets, tracks, conn, now):
+        """Mỗi khung đã xử lý của camera đọc biển: cập nhật xe đứng yên và gắn / bỏ biển đã biết."""
+        still = self.still[cam]
+        matched = set()
+        for group, _, box in dets:
+            if group not in ("car", "bike"):
+                continue
+            s = max(still, key=lambda s: iou(s["box"], box), default=None)
+            if s is not None and iou(s["box"], box) > self.STILL_IOU:
+                matched.add(id(s))
+            else:
+                s = {"box": tuple(box), "since": now, "missing_since": None, "missed": 0}
+                still.append(s)
+                matched.add(id(s))
+        for s in list(still):
+            if id(s) in matched:
+                s["missing_since"], s["missed"] = None, 0
+                continue
+            s["missing_since"] = s["missing_since"] or now
+            s["missed"] += 1
+            if now - s["missing_since"] > PARKED_LOST and s["missed"] >= 3:
+                still.remove(s)
+        for k in list(self.known[cam]):
+            owner = self._owner(still, k["bbox"], now)
+            if k["car"] is not None:
+                if owner is not k["car"]:
+                    self.known[cam].remove(k)
+                    print(f"{datetime.now():%H:%M:%S}  {cam:<8}  xe đỗ {k['plate']} đã đi / đổi chỗ → đọc biển lại",
+                          flush=True)
+                    continue
+                if k["sighting_id"]:
+                    # giữ lần xuất hiện còn tiếp diễn như lúc còn đọc liên tục: xe đi thì vẫn nối vào lần này
+                    for t in tracks[cam]:
+                        if t.sighting_id == k["sighting_id"]:
+                            t.last_seen = now
+                    if now - k.get("flushed", 0) > 30:
+                        conn.execute("UPDATE sightings SET last_seen = MAX(last_seen, ?) WHERE id = ?",
+                                     (now, k["sighting_id"]))
+                        k["flushed"] = now
+            elif owner is not None and owner["since"] <= k["seen"]:
+                k["car"] = owner
+                print(f"{datetime.now():%H:%M:%S}  {cam:<8}  xe đỗ {k['plate']} đã biết biển → không đọc lại", flush=True)
+
+    def regions(self, cam, shape):
+        """Vùng tìm biển của các xe đỗ đã biết biển (để bỏ qua)."""
+        return [r for k in self.known[cam] if k["car"] is not None
+                for r in vehicle_regions([("car", 1.0, k["car"]["box"])], shape)]
+
+    def covers(self, cam, bbox):
+        """Biển vừa đọc là biển của xe đỗ đã biết (quét cả khung, hay vùng xe đỗ bị gộp với người đi ngang)."""
+        return any(k["car"] is not None and iou(k["bbox"], bbox) > 0.4 for k in self.known[cam])
+
+
+def scan_regions(scanned, dets, frame, now, skip=()):
+    """Vùng quanh xe cần tìm biển trong khung này; bỏ qua xe đứng yên vừa quét chưa lâu và vùng trong skip.
     scanned: [(vùng, lúc quét)] của camera, được cập nhật tại chỗ."""
     scanned[:] = [(r, t) for r, t in scanned if now - t < STATIC_RESCAN]
     regions = []
     for r in vehicle_regions(dets, frame.shape):
-        if any(iou(r, old) > 0.8 for old, _ in scanned):
+        if any(iou(r, old) > 0.8 for old, _ in scanned) or any(iou(r, s) > 0.8 for s in skip):
             continue
         regions.append(r)
         scanned.append((r, now))
     return regions
+
+
+def frame_order(cams):
+    """Thứ tự xử lý camera trong một vòng: mỗi camera có số lượt theo LPR_PRIORITY_CAMS, các lượt rải đều trong vòng
+    (weighted round-robin). Khi mọi camera cùng có chuyển động, thời gian AI chia theo số lượt; camera đứng yên hoặc
+    chưa có khung mới bị bỏ qua ngay, nên phần của nó dồn cho các camera đang có chuyển động."""
+    others = sum(1 for c in cams if c not in PRIORITY_CAMS)
+    weights = {c: (PRIORITY_CAMS[c] or max(1, others)) if c in PRIORITY_CAMS else 1 for c in cams}
+    total = sum(weights.values())
+    credit = dict.fromkeys(cams, 0)
+    order = []
+    for _ in range(total):
+        for c in cams:
+            credit[c] += weights[c]
+        best = max(cams, key=credit.__getitem__)
+        credit[best] -= total
+        order.append(best)
+    return order
 
 
 def save_candidate(conn, cam, p):
@@ -214,27 +343,55 @@ def cleanup(conn):
     old_events = conn.execute("SELECT id, img, frame_img FROM events WHERE last_seen < ?", (cutoff,)).fetchall()
     old_visits = conn.execute("SELECT id, img, frame_img FROM visits WHERE last_seen < ?", (cutoff,)).fetchall()
     old_cands = conn.execute("SELECT id, plate_img, frame_img FROM plate_candidates WHERE last_seen < ?", (cutoff,)).fetchall()
+    items = {"sightings": list(old), "events": list(old_events), "visits": list(old_visits), "plate_candidates": list(old_cands)}
     used = sum(f.stat().st_size for f in IMAGES_DIR.rglob("*.jpg")) / 1e6
     if used > MAX_IMAGES_MB:
-        # mỗi lần xuất hiện / sự kiện ~150KB ảnh; xoá dần các bản ghi cũ nhất của cả hai loại
-        n = int((used - MAX_IMAGES_MB * 0.9) / 0.15) + 1
-        old += conn.execute("SELECT id, plate_img, frame_img FROM sightings ORDER BY first_seen LIMIT ?", (n,)).fetchall()
-        old_events += conn.execute("SELECT id, img, frame_img FROM events ORDER BY ts LIMIT ?", (n,)).fetchall()
-        old_visits += conn.execute("SELECT id, img, frame_img FROM visits ORDER BY ts LIMIT ?", (n,)).fetchall()
-    for table, items in (("sightings", old), ("events", old_events), ("visits", old_visits),
-                         ("plate_candidates", old_cands)):
-        for row in items:
-            for rel in tuple(row)[1:]:
+        # xoá bản ghi cũ nhất của mọi loại theo thời gian chung, vừa đủ xuống 90% giới hạn
+        free = (used - MAX_IMAGES_MB * 0.9) * 1e6
+        for table, row_id, *imgs in conn.execute(
+                "SELECT 'sightings', id, plate_img, frame_img, first_seen AS t FROM sightings"
+                " UNION ALL SELECT 'events', id, img, frame_img, ts FROM events"
+                " UNION ALL SELECT 'visits', id, img, frame_img, ts FROM visits"
+                " UNION ALL SELECT 'plate_candidates', id, plate_img, frame_img, ts FROM plate_candidates"
+                " ORDER BY t").fetchall():
+            if free <= 0:
+                break
+            items[table].append((row_id, imgs[0], imgs[1]))
+            for rel in imgs[:2]:
+                f = IMAGES_DIR / rel
+                if f.exists():
+                    free -= f.stat().st_size
+    for table, rows in items.items():
+        for row_id, *imgs in rows:
+            for rel in imgs:
                 (IMAGES_DIR / rel).unlink(missing_ok=True)
-            conn.execute(f"DELETE FROM {table} WHERE id = ?", (row["id"],))
+            conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
     conn.execute("DELETE FROM visitors WHERE id NOT IN (SELECT DISTINCT visitor_id FROM visits)")
     conn.commit()
     for d in sorted(IMAGES_DIR.rglob("*"), reverse=True):  # thư mục con trước thư mục cha
         if d.is_dir() and not any(d.iterdir()):
             shutil.rmtree(d, ignore_errors=True)
-    if old or old_events:
-        print(f"[cleanup] đã xoá {len(old)} lần xuất hiện, {len(old_events)} sự kiện cũ (ảnh dùng {used:.0f} MB)",
+    if any(items.values()):
+        print(f"[cleanup] đã xoá {len(items['sightings'])} lần xuất hiện, {len(items['events'])} sự kiện,"
+              f" {len(items['visits'])} lượt qua lại, {len(items['plate_candidates'])} biển chờ cũ (ảnh dùng {used:.0f} MB)",
               flush=True)
+
+
+def cleanup_in_background() -> threading.Thread:
+    """Chạy cleanup ở thread riêng với kết nối DB riêng. Quét ~200 nghìn ảnh có lúc mất ~30 s: chạy trong vòng chính
+    thì mọi camera ngừng xử lý chừng ấy, rồi vùng cảnh báo còn coi là mất luồng và "học cảnh" thêm 20 s, người vào
+    vùng trong lúc đó không được báo."""
+    def run():
+        conn = connect()
+        try:
+            cleanup(conn)
+        except Exception as e:  # lần sau thử lại, không được làm dừng worker
+            print(f"[cleanup] lỗi: {e}", flush=True)
+        finally:
+            conn.close()
+    t = threading.Thread(target=run, name="cleanup", daemon=True)
+    t.start()
+    return t
 
 
 def p2p_streams(previous: dict) -> dict:
@@ -255,10 +412,28 @@ def pingable(ip: str | None) -> bool:
         return True  # không ping được vì lý do khác thì coi như camera còn sống, giữ cách cũ
 
 
+def reset_stream(cam: str) -> bool:
+    """Tạo lại một luồng trong go2rtc với đúng nguồn cũ: go2rtc nối lại camera đó từ đầu, các luồng khác không
+    bị đụng tới. Cần vì go2rtc giữ khoá của luồng suốt lúc nối lại camera, một lần nối P2P bị treo làm kẹt
+    luôn luồng đó. Người đang xem / ghi phải mở lại kết nối mới vào được luồng mới."""
+    src = (go2rtc_sources() or {}).get(cam)
+    if not src:
+        return False
+    query = urlencode([("name", cam)] + [("src", s) for s in src])
+    try:
+        with urllib.request.urlopen(urllib.request.Request(f"{GO2RTC_API}/api/streams?{query}", method="PUT"),
+                                    timeout=5):
+            return True
+    except OSError as e:
+        print(f"[watchdog] không tạo lại được luồng {cam}: {e}", flush=True)
+        return False
+
+
 class Go2rtcWatchdog:
     """go2rtc đôi khi treo kết nối P2P tới một camera Xiaomi (camera vẫn ping được nhưng không ra hình)
-    và không tự nối lại. Camera P2P nào mất hình quá STALL giây mà vẫn ping được thì khởi động lại go2rtc;
-    camera tắt nguồn / mất mạng thì bỏ qua, vì khởi động lại go2rtc làm mọi camera khác mất hình vài chục giây.
+    và không tự nối lại. Camera P2P nào mất hình quá STALL giây mà vẫn ping được thì trước hết chỉ tạo lại luồng
+    của nó; tạo lại rồi mà vẫn mất hình thêm STALL giây nữa mới khởi động lại go2rtc, vì việc đó làm mọi camera
+    khác mất hình vài chục giây. Camera tắt nguồn / mất mạng thì bỏ qua.
     Lần khởi động lại liên tiếp giãn dần (10 → 20 → … tối đa 120 phút)."""
     STALL = 180
 
@@ -268,16 +443,23 @@ class Go2rtcWatchdog:
         self.backoff = 600.0
         self.next_ping = 0.0
         self.offline = set()
+        self.reset_at = {}  # camera -> lúc tạo lại luồng, chưa có hình lại từ đó
 
-    def check(self, grabbers, ips, now):
+    def check(self, grabbers, ips, now) -> list[str]:
+        """Trả về các camera vừa được tạo lại luồng: worker phải mở kết nối mới tới chúng."""
         stalled = [cam for cam, g in grabbers.items()
                    if now - max(g.last_frame_at or 0, g.started_at, self.started) > self.STALL]
+        for cam, g in grabbers.items():
+            if cam in self.reset_at and (g.last_frame_at or 0) > self.reset_at[cam]:
+                print(f"[watchdog] {cam} có hình lại sau khi tạo lại luồng", flush=True)
+                del self.reset_at[cam]
         if not stalled:
             self.backoff = 600.0
             self.offline = set()
-            return
-        if now - self.last_restart < self.backoff or now < self.next_ping:
-            return
+            return []
+        restart_wait = now - self.last_restart < self.backoff
+        if now < self.next_ping or (restart_wait and all(cam in self.reset_at for cam in stalled)):
+            return []
         alive = [cam for cam in stalled if pingable(ips.get(cam))]
         offline = set(stalled) - set(alive)
         if offline - self.offline:
@@ -286,12 +468,22 @@ class Go2rtcWatchdog:
         self.offline = offline
         if not alive:
             self.next_ping = now + 60
-            return
+            return []
+        done = [cam for cam in alive if cam not in self.reset_at and reset_stream(cam)]
+        if done:
+            print(f"[watchdog] {', '.join(done)} mất hình > {self.STALL}s, tạo lại luồng"
+                  " (camera khác không bị ảnh hưởng)", flush=True)
+            self.reset_at.update(dict.fromkeys(done, now))
+            return done
+        if restart_wait:
+            return []
         print(f"[watchdog] {', '.join(alive)} mất hình > {self.STALL}s, khởi động lại go2rtc", flush=True)
         if self.last_restart:
             self.backoff = min(self.backoff * 2, 7200.0)
         self.last_restart = now
+        self.reset_at.clear()
         subprocess.run(["systemctl", "--user", "restart", "go2rtc"], timeout=60, check=False)
+        return []
 
 
 def main():
@@ -310,10 +502,12 @@ def main():
     tracks = defaultdict(list)                           # camera -> [Track]
     passes = defaultdict(list)                           # camera -> [PlatePass]
     scanned = defaultdict(list)                          # camera -> [(vùng xe, lúc quét)]
+    parked = ParkedCars()
     last_full_scan = defaultdict(float)
     last_frame_id = defaultdict(int)
     fps_counter = Counter()
     next_camera_sync = next_status = next_cleanup = 0.0
+    cleaner = None
     watchdog = Go2rtcWatchdog()
     p2p_cams = {}
     print("Worker đã chạy", flush=True)
@@ -336,6 +530,7 @@ def main():
             zones.load(settings, matrix)
             visits.load(settings)
             watch_plates = set(filter(None, settings.get("watch_plates", "").split(",")))
+            parked.load(conn, lpr_cams, now)
             if lpr_cams and reader is None:
                 reader = PlateReader(MODEL)
             # camera đọc biển cũng chạy YOLO: tìm biển quanh xe rẻ và chính xác hơn quét cả khung
@@ -359,7 +554,9 @@ def main():
             p2p_cams = p2p_streams(p2p_cams)
             next_camera_sync = now + 15
 
-        for cam, g in list(grabbers.items()):
+        for cam in frame_order(list(grabbers)):
+            g = grabbers[cam]
+            now = time.time()  # một vòng kéo dài vài giây; mỗi khung mang đúng thời điểm của nó
             frame, fid = g.latest()
             if frame is None or fid == last_frame_id[cam]:
                 continue
@@ -370,18 +567,27 @@ def main():
             dets = objects.detect(frame) if cam in object_cams else None
             # đọc biển trước tiên: xe chạy nhanh chỉ ở trong khung vài giây
             if cam in lpr_cams:
+                if dets is not None:
+                    parked.update(cam, dets, tracks, conn, now)
                 regions = None
                 if dets is not None and now - last_full_scan[cam] < FULL_SCAN_EVERY:
-                    regions = scan_regions(scanned[cam], dets, frame, now)
+                    regions = scan_regions(scanned[cam], dets, frame, now, parked.regions(cam, frame.shape))
                 else:
                     last_full_scan[cam] = now
                 reads = reader.read(frame, regions) if regions is None or regions else []
+                # khung quét cả hình: biển vẫn tính là nằm trên xe nếu tâm biển ở trong vùng quanh một xe,
+                # nếu không xe chạy nhanh chỉ kịp đọc 1 khung đúng lúc này sẽ bị bỏ qua
+                vehicles = vehicle_regions(dets, frame.shape) if regions is None and dets else []
                 for plate, score, bbox, raw in reads:
+                    if parked.covers(cam, bbox):
+                        continue
                     p = next((p for p in passes[cam] if p.near(bbox, now)), None)
                     if p is None:
                         p = PlatePass(now, bbox)
                         passes[cam].append(p)
-                    p.add(bbox, raw, score, frame, now, regions is not None)
+                    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+                    on_vehicle = regions is not None or any(v[0] <= cx <= v[2] and v[1] <= cy <= v[3] for v in vehicles)
+                    p.add(bbox, raw, score, frame, now, on_vehicle)
                     if plate is None or score < MIN_SCORE:
                         continue
                     t = next((t for t in tracks[cam] if t.matches(plate, bbox)), None)
@@ -406,6 +612,7 @@ def main():
                     for pbox, pid in recognized:
                         visits.link(cam, pbox, pid)
 
+        now = time.time()
         # lần biển đi qua mà không xác nhận được biển nào: lưu ảnh để AI đọc
         for cam, items in passes.items():
             for p in list(items):
@@ -444,11 +651,14 @@ def main():
                 )
             fps_counter.clear()
             conn.commit()
-            watchdog.check({c: g for c, g in grabbers.items() if c in p2p_cams}, p2p_cams, now)
+            for cam in watchdog.check({c: g for c, g in grabbers.items() if c in p2p_cams}, p2p_cams, now):
+                grabbers[cam].running = False  # kết nối cũ còn treo ở luồng cũ trong go2rtc
+                grabbers[cam] = StreamGrabber(cam, f"rtsp://{RTSP_HOST}/{cam}")
+                grabbers[cam].start()
             next_status = now + 10
 
-        if now >= next_cleanup:
-            cleanup(conn)
+        if now >= next_cleanup and not (cleaner and cleaner.is_alive()):
+            cleaner = cleanup_in_background()
             next_cleanup = now + 3600
 
         time.sleep(max(0.0, INTERVAL - (time.time() - loop_start)))

@@ -44,23 +44,35 @@ class Notifier(threading.Thread):
     def configured(self):
         return bool(self.settings.get("telegram_token") and self.settings.get("telegram_chat_id"))
 
-    def send(self, text: str, photo: Path | None = None):
-        """Đưa tin vào hàng đợi; trả về False nếu chưa cấu hình Telegram."""
+    def send(self, text: str, photo: Path | None = None, url: str | None = None):
+        """Đưa tin vào hàng đợi, url là nút mở video kèm theo; trả về False nếu chưa cấu hình Telegram."""
         if not self.configured:
             return False
         try:
-            self.queue.put_nowait((self.settings["telegram_token"], self.settings["telegram_chat_id"], text, photo))
+            self.queue.put_nowait((self.settings["telegram_token"], self.settings["telegram_chat_id"], text, photo, url))
         except queue.Full:
             return False
         return True
 
+    @staticmethod
+    def deliver(token, chat_id, text, photo, url=None):
+        extra = {"reply_markup": json.dumps({"inline_keyboard": [[{"text": "▶️ Xem lại đoạn này", "url": url}]]})} if url else {}
+        if photo and photo.exists():
+            telegram_call(token, "sendPhoto", {"chat_id": chat_id, "caption": text, **extra}, photo)
+        else:
+            telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": text, **extra})
+
     def run(self):
         while True:
-            token, chat_id, text, photo = self.queue.get()
+            token, chat_id, text, photo, url = self.queue.get()
             try:
-                if photo and photo.exists():
-                    telegram_call(token, "sendPhoto", {"chat_id": chat_id, "caption": text}, photo)
-                else:
-                    telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": text})
+                try:
+                    self.deliver(token, chat_id, text, photo, url)
+                except RuntimeError as e:
+                    if not url:
+                        raise
+                    # Telegram từ chối (vd địa chỉ nút không hợp lệ): cảnh báo vẫn phải tới, chỉ thiếu nút
+                    print(f"[telegram] gửi kèm nút lỗi: {e}", flush=True)
+                    self.deliver(token, chat_id, text, photo)
             except Exception as e:
                 print(f"[telegram] gửi lỗi: {e}", flush=True)

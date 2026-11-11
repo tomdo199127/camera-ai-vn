@@ -1,0 +1,16 @@
+[Unit]
+Description=LPR recorder - ghi hình liên tục các camera bật "Ghi hình" (file MP4 1 phút)
+After=go2rtc.service
+Wants=go2rtc.service
+
+[Service]
+WorkingDirectory=%h/lpr-server
+EnvironmentFile=%h/lpr-server/.env
+ExecStart=%h/lpr-server/.venv/bin/python -W ignore -u recorder.py
+Restart=always
+RestartSec=10
+# ffmpeg chỉ chép luồng nên rất nhẹ; để ưu tiên cao hơn worker (Nice=10) cho video không bị hụt khi AI bận
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

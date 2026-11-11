@@ -193,7 +193,10 @@ def iou(a, b):
 
 
 class StreamGrabber(threading.Thread):
-    """Đọc RTSP liên tục ở thread riêng, chỉ giữ frame mới nhất để không bị trễ."""
+    """Đọc RTSP liên tục ở thread riêng để không bị trễ. Mọi frame đều phải giải mã (H.265), nhưng chỉ frame
+    worker xin mới được đổi sang ảnh BGR: đổi màu ảnh 2K tốn khoảng 1/3 công giải mã, mà worker chỉ dùng
+    chưa tới 1 frame/giây trên 20-25 frame/giây của mỗi camera."""
+    WAIT = 0.3  # chờ frame kế tiếp tối đa (luồng Xiaomi P2P có lúc ra frame không đều)
 
     def __init__(self, name: str, url: str):
         super().__init__(daemon=True)
@@ -202,7 +205,8 @@ class StreamGrabber(threading.Thread):
         self.connected = False
         self.last_frame_at = None
         self.started_at = time.time()
-        self.lock = threading.Lock()
+        self.cond = threading.Condition()
+        self.wanted = False
         self.running = True
 
     def run(self):
@@ -215,20 +219,33 @@ class StreamGrabber(threading.Thread):
             print(f"[{self.name}] đã kết nối", flush=True)
             connected_at = time.time()
             while self.running:
-                ok, frame = cap.read()
-                if not ok:
+                if not cap.grab():
                     print(f"[{self.name}] mất luồng, đang kết nối lại", flush=True)
                     break
                 # bỏ các frame đầu: H.265 chưa có keyframe nên ảnh bị nhoè, OCR đọc sai
                 if time.time() - connected_at < 2:
                     continue
-                with self.lock:
-                    self.frame, self.frame_id = frame, self.frame_id + 1
+                with self.cond:
                     self.connected, self.last_frame_at = True, time.time()
+                    if not self.wanted:
+                        continue
+                ok, frame = cap.retrieve()
+                if ok:
+                    with self.cond:
+                        self.frame, self.frame_id = frame, self.frame_id + 1
+                        self.wanted = False
+                        self.cond.notify_all()
             self.connected = False
             cap.release()
             time.sleep(2)
 
     def latest(self):
-        with self.lock:
+        """Frame giải mã ngay sau lúc gọi; (None, id) nếu luồng đang mất hoặc không ra frame trong WAIT giây."""
+        with self.cond:
+            if not self.connected:
+                return None, self.frame_id
+            self.wanted = True
+            fid = self.frame_id
+            if not self.cond.wait_for(lambda: self.frame_id != fid, self.WAIT):
+                return None, fid
             return self.frame, self.frame_id

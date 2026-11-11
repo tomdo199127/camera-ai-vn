@@ -1,4 +1,4 @@
-"""Phát hiện người / xe bằng YOLO11n (COCO, xuất sang ONNX) cho cảnh báo vùng và nhận diện khuôn mặt."""
+"""Phát hiện người / xe / chó mèo bằng YOLO11n (COCO, xuất sang ONNX) cho cảnh báo vùng và nhận diện khuôn mặt."""
 
 import cv2
 import numpy as np
@@ -7,8 +7,8 @@ import onnxruntime as ort
 from common import MODELS_DIR
 
 # lớp COCO cần dùng -> nhóm hiển thị trên web
-CLASS_GROUPS = {0: "person", 1: "bike", 2: "car", 3: "bike", 5: "car", 7: "car"}
-GROUP_LABELS = {"person": "Người", "car": "Ô tô", "bike": "Xe máy / xe đạp"}
+CLASS_GROUPS = {0: "person", 1: "bike", 2: "car", 3: "bike", 5: "car", 7: "car", 15: "animal", 16: "animal"}
+GROUP_LABELS = {"person": "Người", "car": "Ô tô", "bike": "Xe máy / xe đạp", "animal": "Chó / mèo"}
 
 
 class ObjectDetector:

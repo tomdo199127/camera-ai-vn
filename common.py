@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sqlite3
 import urllib.request
 from pathlib import Path
@@ -11,6 +12,9 @@ import yaml
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("LPR_DATA_DIR", BASE_DIR / "data"))
 IMAGES_DIR = DATA_DIR / "images"
+# video ghi liên tục: REC_DIR/<camera>/<YYYY-MM-DD>/<HH-MM-SS>.mp4, mỗi file 1 phút (recorder.py)
+REC_DIR = Path(os.environ.get("LPR_REC_DIR", DATA_DIR / "recordings"))
+REC_STATUS = REC_DIR / "status.json"
 DB_PATH = DATA_DIR / "lpr.db"
 MODELS_DIR = Path(os.environ.get("LPR_MODELS_DIR", BASE_DIR / "models"))
 
@@ -161,6 +165,23 @@ CREATE TABLE IF NOT EXISTS plate_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_plate_candidates_ts ON plate_candidates(ts);
 
+-- Chạy thử: lần AI đọc chưa chắc mà gần một biển xe quen (ai.py). Chỉ ghi lại để đánh giá, không đổi biển.
+CREATE TABLE IF NOT EXISTS plate_suggestions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL NOT NULL,
+    camera        TEXT NOT NULL,
+    sighting_id   INTEGER,                  -- NULL: AI đọc không đủ chắc để ghi thành lần xuất hiện
+    read_plate    TEXT NOT NULL,
+    read_conf     REAL NOT NULL,
+    known_plate   TEXT NOT NULL,            -- biển xe quen gần nhất
+    decision      TEXT NOT NULL,            -- suggest / ambiguous / vehicle_mismatch / vehicle_unknown / no_profile
+    vehicle       TEXT,                     -- JSON loại xe, hãng, màu của lần đọc này
+    known_vehicle TEXT,                     -- JSON hồ sơ xe quen
+    plate_img     TEXT NOT NULL,
+    frame_img     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plate_suggestions_ts ON plate_suggestions(ts);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -176,10 +197,23 @@ CREATE TABLE IF NOT EXISTS sessions (
     ip         TEXT NOT NULL DEFAULT '',
     agent      TEXT NOT NULL DEFAULT ''
 );
+
+-- tài khoản web: admin xem/sửa được mọi thứ, thành viên chỉ mở các trang trong perms
+CREATE TABLE IF NOT EXISTS users (
+    id         INTEGER PRIMARY KEY,
+    username   TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    pw_hash    TEXT NOT NULL,
+    is_admin   INTEGER NOT NULL DEFAULT 0,
+    perms      TEXT NOT NULL DEFAULT '',    -- tên trang, cách nhau bởi dấu phẩy (web.PAGES)
+    disabled   INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
 """
 
 # cột thêm sau lần triển khai đầu: (bảng, cột, kiểu)
 MIGRATIONS = [
+    ("users", "cam_order", "TEXT NOT NULL DEFAULT ''"),    # thứ tự camera riêng của tài khoản, cách nhau bởi dấu phẩy
+    ("sessions", "location", "TEXT NOT NULL DEFAULT ''"),  # vị trí gần đúng của IP (theo Cloudflare)
     ("cameras", "face_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ("camera_status", "motion", "REAL"),
     ("cameras", "track_enabled", "INTEGER NOT NULL DEFAULT 0"),
@@ -189,6 +223,8 @@ MIGRATIONS = [
     ("visits", "maybe_sim", "REAL"),
     ("visits", "clip_emb", "BLOB"),                        # vector CLIP của ảnh (float16) để tìm theo mô tả
     ("visits", "colors", "BLOB"),                          # tỉ lệ màu theo vùng đầu / thân / dưới (search.py)
+    ("events", "clip_emb", "BLOB"),                        # như trên, cho ảnh cảnh báo vùng (tìm ở trang Cảnh báo)
+    ("events", "colors", "BLOB"),
     # ý kiến của AI (ai.py) về gợi ý "có thể trùng": same / different / unsure / error
     ("visits", "ai_verdict", "TEXT"),
     ("visits", "ai_conf", "REAL"),
@@ -197,6 +233,11 @@ MIGRATIONS = [
     ("sightings", "ai_status", "TEXT"),
     ("sightings", "ai_plate", "TEXT"),
     ("sightings", "ai_conf", "REAL"),
+    ("sightings", "vehicle", "TEXT"),                     # JSON loại xe, hãng, màu do AI nhận ra lúc đọc biển
+    ("cameras", "record_enabled", "INTEGER NOT NULL DEFAULT 0"),  # ghi hình liên tục (recorder.py)
+    ("cameras", "record_audio", "INTEGER NOT NULL DEFAULT 1"),    # ghi kèm tiếng (khi bật ghi hình)
+    ("cameras", "talk_enabled", "INTEGER NOT NULL DEFAULT 0"),    # nút nói qua loa camera khi xem trực tiếp
+    ("users", "cameras", "TEXT NOT NULL DEFAULT ''"),  # camera được xem, cách nhau bởi dấu phẩy; '' = tất cả
 ]
 
 
@@ -219,6 +260,7 @@ def init_db():
     # cột thêm bằng migration nên index tạo sau; thiếu index này trang Qua lại mất ~30 s mỗi lần tải
     conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_maybe ON visits(maybe_visitor)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_visits_noclip ON visits(ts) WHERE clip_emb IS NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_noclip ON events(ts) WHERE clip_emb IS NULL AND kind = 'zone'")
     conn.commit()
     conn.close()
 
@@ -236,6 +278,18 @@ def merge_visitors(conn, vid: int, into: int):
 
 def get_settings(conn) -> dict:
     return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+
+
+def rec_limit_gb(settings: dict) -> float:
+    """Giới hạn dung lượng video ghi hình (GB). Chưa cài thì lấy 80% dung lượng ổ chứa REC_DIR."""
+    try:
+        gb = float(settings.get("rec_max_gb") or 0)
+    except ValueError:
+        gb = 0
+    if gb > 0:
+        return gb
+    REC_DIR.mkdir(parents=True, exist_ok=True)
+    return round(shutil.disk_usage(REC_DIR).total * 0.8 / 1e9)
 
 
 # các loại thông báo Telegram, bật riêng cho từng camera

@@ -180,8 +180,13 @@ CLOTHES = {
 }
 VEHICLES = {"xe may": "motorbike", "xe tay ga": "scooter", "xe so": "motorbike", "xe dap": "bicycle",
             "xe dap dien": "electric bicycle", "xe dien": "electric scooter", "o to": "car", "xe hoi": "car",
-            "xe": "motorbike", "xe ba gac": "cargo tricycle"}
-PEOPLE = {"nu": "woman", "phu nu": "woman", "con gai": "girl", "nam": "man", "dan ong": "man", "con trai": "boy",
+            "xe": "motorbike", "xe ba gac": "cargo tricycle", "xe tai": "truck", "xe khach": "bus", "xe buyt": "bus",
+            "xe bus": "bus", "taxi": "taxi", "xe ban tai": "pickup truck", "xe con": "car"}
+CARS = {"car", "truck", "bus", "taxi", "pickup truck"}  # cảnh báo nhóm "Ô tô" (YOLO gộp ô tô, xe tải, xe buýt)
+ANIMALS = {"cho": "dog", "con cho": "dog", "cun": "dog", "meo": "cat", "con meo": "cat", "dong vat": "animal",
+           "con vat": "animal", "thu cung": "pet", "cho meo": "dog or cat"}
+PEOPLE = {"nu": "woman", "phu nu": "woman", "con gai": "woman", "nam": "man", "dan ong": "man", "con trai": "man",
+          "gai": "woman", "trai": "man", "dan ba": "woman", "nguoi": "person",
           "tre em": "child", "tre con": "child", "em be": "child", "nguoi gia": "elderly person", "ong": "old man",
           "ba": "old woman", "shipper": "delivery rider", "xe om": "motorbike taxi driver"}
 # đồng phục tài xế công nghệ dễ nhận ra bằng màu
@@ -192,8 +197,8 @@ ACTIONS = {"di bo": "walking", "cho hang": "carrying goods", "cho nguoi": "carry
 PLURAL = {"clothes", "pants", "shorts", "jeans", "glasses", "shoes"}
 
 PHRASES = {}
-for kind, table in (("color", COLORS), ("cloth", CLOTHES), ("vehicle", VEHICLES), ("person", PEOPLE),
-                    ("action", ACTIONS)):
+for kind, table in (("color", COLORS), ("cloth", CLOTHES), ("vehicle", VEHICLES), ("animal", ANIMALS),
+                    ("person", PEOPLE), ("action", ACTIONS)):
     for k, v in table.items():
         PHRASES[k] = (kind, v)
 for k, v in BRANDS.items():
@@ -201,13 +206,18 @@ for k, v in BRANDS.items():
 for k, v in AMBIGUOUS.items():
     PHRASES[k] = ("color", v)
 MAX_WORDS = max(len(k.split()) for k in PHRASES)
+OPPOSITE = {"woman": "man", "man": "woman", "old woman": "old man", "old man": "old woman", "child": "grown-up"}
 
 
 @lru_cache(maxsize=256)
-def translate(query: str) -> tuple[tuple[str, ...], tuple]:
-    """Mô tả tiếng Việt -> (các câu tiếng Anh, các yêu cầu màu theo vùng [(vùng, (màu…))]).
+def describe(query: str) -> tuple[tuple[str, ...], tuple, frozenset, tuple[str, ...]]:
+    """Mô tả tiếng Việt -> (các câu tiếng Anh, các yêu cầu màu theo vùng [(vùng, (màu…))], nhóm đối tượng,
+    các câu đối lập).
 
-    Có nhiều câu khi gặp từ nhiều nghĩa như "xanh"; điểm của ảnh lấy theo câu khớp nhất.
+    Có nhiều câu khi gặp từ nhiều nghĩa như "xanh"; điểm của ảnh lấy theo câu khớp nhất. Nhóm đối tượng là
+    nhóm YOLO của cảnh báo nên tìm trong đó ("ô tô trắng" -> car, "chó" -> animal); rỗng là tìm hết.
+    Câu đối lập là cùng câu nhưng giới tính / tuổi ngược lại: CLIP chấm "a woman" cho mọi ảnh người gần như bằng
+    nhau, so với "a man" mới tách được nam / nữ (trẻ em / người lớn cũng vậy).
     Không nhận ra từ nào thì dùng nguyên câu (người dùng gõ tiếng Anh)."""
     words = re.findall(r"[a-z0-9]+", _plain(query))
     items, who, actions = [], None, []    # items: [kind, tên tiếng Anh, [màu…]]
@@ -224,9 +234,9 @@ def translate(query: str) -> tuple[tuple[str, ...], tuple]:
         kind, val = PHRASES[key]
         i += n
         if kind == "color":
-            # tiếng Việt đặt màu sau vật: "áo trắng", "xe máy vàng"
+            # tiếng Việt đặt màu sau vật: "áo trắng", "xe máy vàng", "chó vàng"
             (items[-1][2] if items else loose).append(val)
-        elif kind in ("cloth", "vehicle"):
+        elif kind in ("cloth", "vehicle", "animal"):
             items.append([kind, val, loose])
             loose = []
         elif kind == "brand":  # "áo xanh GSM": màu đồng phục thay cho màu của áo vừa nhắc
@@ -239,9 +249,13 @@ def translate(query: str) -> tuple[tuple[str, ...], tuple]:
         elif kind == "action":
             actions.append(val)
     if loose:
-        items.append(["cloth", "clothes", loose])
+        # màu không gắn với vật nào: của ô tô / con vật nếu chỉ hỏi về chúng, còn lại là màu quần áo
+        if items and all(k == "animal" or n in CARS for k, n, _ in items) and not who:
+            items[-1][2] += loose
+        else:
+            items.append(["cloth", "clothes", loose])
     if not items and not who and not actions:
-        return (f"a photo of a person, {query.strip()}",), ()
+        return (f"a photo of {query.strip()}",), (), frozenset(), ()
 
     def expand(colors):
         """[màu hoặc tuple màu nhiều nghĩa] -> các cách viết màu."""
@@ -251,57 +265,88 @@ def translate(query: str) -> tuple[tuple[str, ...], tuple]:
             out = [f"{o} {x}".strip() for o in out for x in opts]
         return out
 
-    sentences = [""]
-    for kind, name, colors in items:
-        parts = [f"{c} {name}".strip() for c in expand(colors)]
-        verb = "riding a" if kind == "vehicle" else "wearing" if name in PLURAL else "wearing a"
-        sentences = [f"{s} {verb} {p}," for s in sentences for p in parts]
-    subject = f"a photo of a {who or 'person'}"
-    tail = (" " + ", ".join(actions)) if actions else ""
+    # ô tô và con vật đứng riêng một ảnh; quần áo, xe máy, xe đạp đi cùng người
+    things = [it for it in items if it[0] == "animal" or it[1] in CARS]
+    personal = [it for it in items if it not in things]
+    prompts, groups = [], set()
+    for kind, name, colors in things:
+        prompts += [f"a photo of a {c} {name}".replace("  ", " ") for c in expand(colors)]
+        groups.add("animal" if kind == "animal" else "car")
+    if personal or who or actions or not things:
+        sentences = [""]
+        for kind, name, colors in personal:
+            parts = [f"{c} {name}".strip() for c in expand(colors)]
+            verb = "riding a" if kind == "vehicle" else "wearing" if name in PLURAL else "wearing a"
+            sentences = [f"{s} {verb} {p}," for s in sentences for p in parts]
+        subject = f"a photo of a {who or 'person'}"
+        tail = (" " + ", ".join(actions)) if actions else ""
+        prompts += [f"{subject}{s.rstrip(',')}{tail}" for s in sentences[:8]]
+        groups |= {"person", "bike"}  # người đi xe máy có thể được báo là "Người" hoặc "Xe máy / xe đạp"
     constraints = []
     for kind, name, colors in items:
         bins = {b for c in colors for opt in (c if isinstance(c, tuple) else (c,)) for b in ENGLISH_BINS.get(opt, ())}
         if bins:
-            region = "lower" if kind == "vehicle" else ITEM_REGION.get(name, "torso")
+            region = ("all" if kind == "animal" or name in CARS else "lower" if kind == "vehicle"
+                      else ITEM_REGION.get(name, "torso"))
             constraints.append((region, tuple(sorted(bins))))
-    return tuple(f"{subject}{s.rstrip(',')}{tail}" for s in sentences[:8]), tuple(constraints)
+    prompts = tuple(prompts[:12])
+    other = OPPOSITE.get(who)
+    contrast = tuple(p.replace(f"a photo of a {who}", f"a photo of a {other}") for p in prompts
+                     if p.startswith(f"a photo of a {who}")) if other else ()
+    return prompts, tuple(constraints), frozenset(groups), contrast
+
+
+def translate(query: str) -> tuple[tuple[str, ...], tuple]:
+    """Như describe() nhưng không có nhóm đối tượng (tìm người qua lại)."""
+    return describe(query)[:2]
 
 
 def color_score(profiles, constraints):
-    """profiles: (n, 3, len(BINS)) -> điểm cộng thêm (n,): tỉ lệ màu khớp trung bình trên các yêu cầu."""
+    """profiles: (n, 3, len(BINS)) -> điểm cộng thêm (n,): tỉ lệ màu khớp trung bình trên các yêu cầu.
+    Vùng "all" (ô tô, con vật): trung bình cả ảnh."""
     if not constraints:
         return np.zeros(len(profiles), np.float32)
     names = list(REGIONS)
-    parts = [profiles[:, names.index(region), [BINS.index(b) for b in bins]].sum(1) for region, bins in constraints]
+    parts = [profiles[:, :, [BINS.index(b) for b in bins]].sum(2).mean(1) if region == "all"
+             else profiles[:, names.index(region), [BINS.index(b) for b in bins]].sum(1)
+             for region, bins in constraints]
     return COLOR_WEIGHT * np.minimum(1.0, np.mean(parts, axis=0)).astype(np.float32)
 
 
-# ---------- service chạy nền: tính vector cho các lượt chưa có ----------
+# ---------- service chạy nền: tính vector cho các ảnh chưa có ----------
+# bảng -> điều kiện ảnh đã chốt: lượt qua lại chỉ tính khi người đã đi khỏi (ảnh còn được thay bằng ảnh rõ hơn);
+# cảnh báo vùng chụp một lần lúc vào vùng (cảnh báo khuôn mặt là ảnh mặt, không tìm theo mô tả)
+SOURCES = {"visits": ("last_seen < ?", 60), "events": ("kind = 'zone' AND ts < ?", 5)}
+
+
 def main():
     init_db()
     conn = connect()
     model = ClipModel(text=False)
     print("CLIP: đã chạy", flush=True)
     while True:
-        # chỉ tính khi người đã đi khỏi: ảnh của lượt có thể còn được thay bằng ảnh rõ hơn
-        rows = conn.execute("SELECT id, img FROM visits WHERE clip_emb IS NULL AND last_seen < ?"
-                            " ORDER BY ts DESC LIMIT ?", (time.time() - 60, BATCH)).fetchall()
-        if not rows:
-            time.sleep(20)
-            continue
-        crops, ids = [], []
-        for r in rows:
-            img = cv2.imread(str(IMAGES_DIR / r["img"])) if r["img"] else None
-            if img is None or img.size == 0:
-                conn.execute("UPDATE visits SET clip_emb = x'' WHERE id = ?", (r["id"],))  # ảnh đã bị xoá: bỏ qua
+        busy = False
+        for table, (cond, wait) in SOURCES.items():
+            rows = conn.execute(f"SELECT id, img FROM {table} WHERE clip_emb IS NULL AND {cond}"
+                                " ORDER BY ts DESC LIMIT ?", (time.time() - wait, BATCH)).fetchall()
+            if not rows:
                 continue
-            crops.append(img)
-            ids.append(r["id"])
-        if crops:
-            for vid, v, img in zip(ids, model.embed_images(crops), crops):
-                conn.execute("UPDATE visits SET clip_emb = ?, colors = ? WHERE id = ?",
-                             (v.astype(np.float16).tobytes(), color_profile(img).tobytes(), vid))
-        conn.commit()
+            busy = True
+            crops, ids = [], []
+            for r in rows:
+                img = cv2.imread(str(IMAGES_DIR / r["img"])) if r["img"] else None
+                if img is None or img.size == 0:
+                    conn.execute(f"UPDATE {table} SET clip_emb = x'' WHERE id = ?", (r["id"],))  # ảnh đã bị xoá: bỏ qua
+                    continue
+                crops.append(img)
+                ids.append(r["id"])
+            if crops:
+                for rid, v, img in zip(ids, model.embed_images(crops), crops):
+                    conn.execute(f"UPDATE {table} SET clip_emb = ?, colors = ? WHERE id = ?",
+                                 (v.astype(np.float16).tobytes(), color_profile(img).tobytes(), rid))
+            conn.commit()
+        if not busy:
+            time.sleep(20)
 
 
 if __name__ == "__main__":
