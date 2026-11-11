@@ -57,7 +57,7 @@ Camera (RTSP / ONVIF / Xiaomi) ──► go2rtc ──► worker ──► SQLit
 
 ## Yêu cầu
 
-- Máy Linux chạy liên tục: **Ubuntu 20.04 trở lên** hoặc Debian, CPU **x86_64** (máy ảo cũng được). Script cài có hỗ trợ ARM64 (Raspberry Pi 5, mini PC ARM) nhưng chưa được thử thực tế.
+- Máy Linux chạy liên tục: **Ubuntu 20.04 trở lên** hoặc Debian, CPU **x86_64** (máy ảo cũng được). Script cài có hỗ trợ ARM64 (Raspberry Pi 5, mini PC ARM) nhưng chưa được thử thực tế. Máy **Windows 10 / 11** cũng chạy được, qua Ubuntu trong WSL2 (xem [Cài trên Windows](#cài-trên-windows-10--11)).
 - Tham khảo thực tế: 5 camera (3 camera cổng đọc biển số, ghi hình cả 5) trên máy ảo **8 nhân (i7-8700), 10 GB RAM** dùng trung bình khoảng 35% CPU. Máy 4 nhân chạy được nhưng gần hết CPU lúc đông người, xe qua lại; nên dùng từ 4 nhân trở lên, nhiều camera thì cần mạnh hơn.
 - Ổ đĩa: khoảng 3 GB cho phần mềm và model, cộng phần ảnh lưu lại (mặc định giới hạn 1 GB, chỉnh được). Ghi hình thì cần thêm chỗ cho video: camera 4MP H.265 khoảng 10–45 GB mỗi ngày tuỳ bitrate (camera Xiaomi 2K đo được ~14 GB/ngày).
 - Máy chủ **cùng mạng** với camera (hoặc nối VPN tới mạng camera).
@@ -94,6 +94,32 @@ sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp
 ```
 
 Muốn tự tải mã về trước thì `git clone https://github.com/tomdo199127/camera-ai-vn.git ~/lpr-server` rồi chạy `bash ~/lpr-server/deploy/install.sh`, kết quả như nhau.
+
+### Cài trên Windows 10 / 11
+
+Hệ thống chạy trong **Ubuntu của WSL2** (Linux chạy bên trong Windows, có sẵn của Microsoft), không cần cài máy ảo riêng. Cần Windows 10 bản 2004 trở lên hoặc Windows 11, CPU bật ảo hoá (VT-x / AMD-V, hầu hết máy đã bật sẵn).
+
+Mở **Terminal (Admin)** (chuột phải nút Start → *Terminal (Admin)* hoặc *Windows PowerShell (Admin)*) và chạy **một lệnh**:
+
+```powershell
+irm https://raw.githubusercontent.com/tomdo199127/camera-ai-vn/main/deploy/install-windows.ps1 | iex
+```
+
+- **Máy chưa có WSL:** lần chạy đầu chỉ cài WSL2 và Ubuntu 24.04 rồi dừng. Khởi động lại máy nếu Windows yêu cầu, mở *Ubuntu* từ menu Start, đặt tên và mật khẩu cho tài khoản Linux, rồi **chạy lại đúng lệnh trên**.
+- **Lần chạy thứ hai:** script làm tiếp phần còn lại.
+  1. Bật systemd trong Ubuntu. Ghi `%USERPROFILE%\.wslconfig` để WSL không tự tắt khi rảnh (bản cũ được lưu thành `.wslconfig.bak`). Trên Windows 11 thì bật thêm mạng *mirrored*: Ubuntu dùng chung IP với Windows.
+  2. Chạy script cài Linux ở trên bên trong Ubuntu (hỏi mật khẩu Linux cho sudo).
+  3. Tạo tác vụ **Camera AI** trong Task Scheduler. Tác vụ này mở Ubuntu chạy nền mỗi lần đăng nhập Windows. Trên Windows 10, nó còn chuyển tiếp cổng web vào Ubuntu, vì IP của Ubuntu đổi sau mỗi lần khởi động.
+  4. Mở cổng web trên tường lửa Windows, chỉ cho mạng *Private*.
+- **Cài xong:** mở `http://localhost:8080` trên chính máy đó, hoặc `http://<IP máy Windows>:8080` từ điện thoại. Mạng Wi-Fi / LAN của Windows phải đặt là *Private* (Settings → Network → chọn mạng → Private network). Tài khoản mặc định như trên.
+- **Cập nhật:** chạy lại lệnh, hoặc chạy lệnh cài Linux trong cửa sổ Ubuntu.
+
+Lưu ý khi chạy trên Windows:
+- Hệ thống chỉ chạy khi đã **đăng nhập Windows**. Máy đặt chạy liên tục thì bật tự đăng nhập (gõ `netplwiz`, bỏ chọn *Users must enter a user name and password*), tắt Sleep, và nếu muốn tự bật lại sau mất điện thì bật *Restore on AC power loss* trong BIOS.
+- Dữ liệu và video nằm trong ổ ảo của Ubuntu, mặc định ở ổ **C:**. Ghi hình nhiều camera thì nên chuyển Ubuntu sang ổ lớn hơn **trước khi** thêm camera: `wsl --shutdown`, rồi `wsl --manage Ubuntu-24.04 --move D:\WSL` (cần WSL bản mới, `wsl --update`). Không nên để `LPR_REC_DIR` ở `/mnt/d/...`: ghi qua ổ Windows chậm hơn nhiều.
+- Giao diện go2rtc (thêm camera Xiaomi) mở thẳng `http://localhost:1984` trên máy Windows, không cần SSH tunnel.
+- Máy đang chạy máy ảo VMware / VirtualBox: bật WSL2 sẽ bật nền Hyper-V. VMware và VirtualBox bản mới vẫn chạy được nhưng có thể chậm hơn. Đừng cài lên máy Windows đang làm máy chủ cho máy ảo quan trọng nếu chưa thử.
+- Đã có sẵn bản Ubuntu khác trong WSL: script dùng bản đầu tiên có tên bắt đầu bằng `Ubuntu`. Muốn chọn bản khác thì đặt `$env:CAMERA_AI_DISTRO = 'Tên-bản'` trước khi chạy lệnh.
 
 ## Thêm camera
 
