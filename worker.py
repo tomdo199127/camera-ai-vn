@@ -9,6 +9,7 @@ Chỉ những khung có chuyển động (cộng một khung định kỳ) mới
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -34,6 +35,7 @@ VOTE_WINDOW = float(os.environ.get("LPR_VOTE_WINDOW", 15))
 SIGHTING_GAP = float(os.environ.get("LPR_SIGHTING_GAP", 120))    # mất dấu quá lâu -> lần xuất hiện mới
 RETENTION_DAYS = float(os.environ.get("LPR_RETENTION_DAYS", 30))
 MAX_IMAGES_MB = float(os.environ.get("LPR_MAX_IMAGES_MB", 1000))
+CLEANUP_BATCH = 100      # số bản ghi xoá mỗi lần commit khi dọn dữ liệu cũ (giữ khoá ghi ngắn)
 MODEL = os.environ.get("LPR_MODEL", "yolo-v9-s-608-license-plate-end2end")
 FRAME_MAX_WIDTH = 1280
 # biển chỉ được tìm trong vùng quanh xe (YOLO thấy xe máy / ô tô); thỉnh thoảng quét cả khung phòng YOLO bỏ sót xe
@@ -361,11 +363,18 @@ def cleanup(conn):
                 f = IMAGES_DIR / rel
                 if f.exists():
                     free -= f.stat().st_size
+    # Xoá theo từng lô ngắn, commit rồi mới xoá file ảnh. Trước đây xoá ảnh ngay trong transaction: ổ đang ghi hình
+    # nên hơn nghìn file mất tới 2 phút, suốt lúc đó giữ khoá ghi, vòng chính chờ quá 30 s thì sập "database is locked".
     for table, rows in items.items():
-        for row_id, *imgs in rows:
-            for rel in imgs:
-                (IMAGES_DIR / rel).unlink(missing_ok=True)
-            conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+        rows = list({r[0]: r for r in rows}.values())  # một bản ghi có thể vừa quá hạn vừa nằm trong phần vượt dung lượng
+        for i in range(0, len(rows), CLEANUP_BATCH):
+            batch = rows[i:i + CLEANUP_BATCH]
+            conn.executemany(f"DELETE FROM {table} WHERE id = ?", [(r[0],) for r in batch])
+            conn.commit()
+            for _, *imgs in batch:
+                for rel in imgs:
+                    if rel:
+                        (IMAGES_DIR / rel).unlink(missing_ok=True)
     conn.execute("DELETE FROM visitors WHERE id NOT IN (SELECT DISTINCT visitor_id FROM visits)")
     conn.commit()
     for d in sorted(IMAGES_DIR.rglob("*"), reverse=True):  # thư mục con trước thư mục cha
@@ -513,155 +522,166 @@ def main():
     print("Worker đã chạy", flush=True)
 
     while True:
-        loop_start = now = time.time()
+        try:
+            loop_start = now = time.time()
 
-        if now >= next_camera_sync:  # bật/tắt camera và tính năng theo cấu hình trên web
-            cams = conn.execute("SELECT id, name, lpr_enabled, face_enabled, track_enabled FROM cameras").fetchall()
-            camera_names.update({r["id"]: r["name"] for r in cams})
-            lpr_cams = {r["id"] for r in cams if r["lpr_enabled"]}
-            face_cams = {r["id"] for r in cams if r["face_enabled"]}
-            track_cams = {r["id"] for r in cams if r["track_enabled"]}
-            settings = get_settings(conn)
-            notifier.settings = settings
-            # chu kỳ quét định kỳ khi không có chuyển động, chỉnh trong trang Cài đặt
-            alerts.HEARTBEAT = min(60.0, max(2.0, float(settings.get("scan_interval") or alerts.HEARTBEAT)))
-            matrix = notify_matrix(settings, [r["id"] for r in cams])
-            policy.load(settings, matrix)
-            zones.load(settings, matrix)
-            visits.load(settings)
-            watch_plates = set(filter(None, settings.get("watch_plates", "").split(",")))
-            parked.load(conn, lpr_cams, now)
-            if lpr_cams and reader is None:
-                reader = PlateReader(MODEL)
-            # camera đọc biển cũng chạy YOLO: tìm biển quanh xe rẻ và chính xác hơn quét cả khung
-            object_cams = face_cams | track_cams | zones.cameras() | lpr_cams
-            if object_cams and objects is None:
-                from detector import ObjectDetector
-                objects = ObjectDetector()
-            if face_cams and face_monitor is None:
-                from faces import FaceAnalyzer
-                face_monitor = FaceMonitor(conn, policy, FaceAnalyzer(), camera_names)
-            if face_monitor:
-                face_monitor.load()
-            enabled = lpr_cams | object_cams
-            for cam in enabled - grabbers.keys():
-                grabbers[cam] = StreamGrabber(cam, f"rtsp://{RTSP_HOST}/{cam}")
-                grabbers[cam].start()
-            for cam in grabbers.keys() - enabled:
-                grabbers.pop(cam).running = False
-                conn.execute("DELETE FROM camera_status WHERE camera = ?", (cam,))
-                conn.commit()
-            p2p_cams = p2p_streams(p2p_cams)
-            next_camera_sync = now + 15
+            if now >= next_camera_sync:  # bật/tắt camera và tính năng theo cấu hình trên web
+                cams = conn.execute("SELECT id, name, lpr_enabled, face_enabled, track_enabled FROM cameras").fetchall()
+                camera_names.update({r["id"]: r["name"] for r in cams})
+                lpr_cams = {r["id"] for r in cams if r["lpr_enabled"]}
+                face_cams = {r["id"] for r in cams if r["face_enabled"]}
+                track_cams = {r["id"] for r in cams if r["track_enabled"]}
+                settings = get_settings(conn)
+                notifier.settings = settings
+                # chu kỳ quét định kỳ khi không có chuyển động, chỉnh trong trang Cài đặt
+                alerts.HEARTBEAT = min(60.0, max(2.0, float(settings.get("scan_interval") or alerts.HEARTBEAT)))
+                matrix = notify_matrix(settings, [r["id"] for r in cams])
+                policy.load(settings, matrix)
+                zones.load(settings, matrix)
+                visits.load(settings)
+                watch_plates = set(filter(None, settings.get("watch_plates", "").split(",")))
+                parked.load(conn, lpr_cams, now)
+                if lpr_cams and reader is None:
+                    reader = PlateReader(MODEL)
+                # camera đọc biển cũng chạy YOLO: tìm biển quanh xe rẻ và chính xác hơn quét cả khung
+                object_cams = face_cams | track_cams | zones.cameras() | lpr_cams
+                if object_cams and objects is None:
+                    from detector import ObjectDetector
+                    objects = ObjectDetector()
+                if face_cams and face_monitor is None:
+                    from faces import FaceAnalyzer
+                    face_monitor = FaceMonitor(conn, policy, FaceAnalyzer(), camera_names)
+                if face_monitor:
+                    face_monitor.load()
+                enabled = lpr_cams | object_cams
+                for cam in enabled - grabbers.keys():
+                    grabbers[cam] = StreamGrabber(cam, f"rtsp://{RTSP_HOST}/{cam}")
+                    grabbers[cam].start()
+                for cam in grabbers.keys() - enabled:
+                    grabbers.pop(cam).running = False
+                    conn.execute("DELETE FROM camera_status WHERE camera = ?", (cam,))
+                    conn.commit()
+                p2p_cams = p2p_streams(p2p_cams)
+                next_camera_sync = now + 15
 
-        for cam in frame_order(list(grabbers)):
-            g = grabbers[cam]
-            now = time.time()  # một vòng kéo dài vài giây; mỗi khung mang đúng thời điểm của nó
-            frame, fid = g.latest()
-            if frame is None or fid == last_frame_id[cam]:
-                continue
-            last_frame_id[cam] = fid
-            if not gates[cam].check(frame, now):
-                continue
-            fps_counter[cam] += 1
-            dets = objects.detect(frame) if cam in object_cams else None
-            # đọc biển trước tiên: xe chạy nhanh chỉ ở trong khung vài giây
-            if cam in lpr_cams:
+            for cam in frame_order(list(grabbers)):
+                g = grabbers[cam]
+                now = time.time()  # một vòng kéo dài vài giây; mỗi khung mang đúng thời điểm của nó
+                frame, fid = g.latest()
+                if frame is None or fid == last_frame_id[cam]:
+                    continue
+                last_frame_id[cam] = fid
+                if not gates[cam].check(frame, now):
+                    continue
+                fps_counter[cam] += 1
+                dets = objects.detect(frame) if cam in object_cams else None
+                # đọc biển trước tiên: xe chạy nhanh chỉ ở trong khung vài giây
+                if cam in lpr_cams:
+                    if dets is not None:
+                        parked.update(cam, dets, tracks, conn, now)
+                    regions = None
+                    if dets is not None and now - last_full_scan[cam] < FULL_SCAN_EVERY:
+                        regions = scan_regions(scanned[cam], dets, frame, now, parked.regions(cam, frame.shape))
+                    else:
+                        last_full_scan[cam] = now
+                    reads = reader.read(frame, regions) if regions is None or regions else []
+                    # khung quét cả hình: biển vẫn tính là nằm trên xe nếu tâm biển ở trong vùng quanh một xe,
+                    # nếu không xe chạy nhanh chỉ kịp đọc 1 khung đúng lúc này sẽ bị bỏ qua
+                    vehicles = vehicle_regions(dets, frame.shape) if regions is None and dets else []
+                    for plate, score, bbox, raw in reads:
+                        if parked.covers(cam, bbox):
+                            continue
+                        p = next((p for p in passes[cam] if p.near(bbox, now)), None)
+                        if p is None:
+                            p = PlatePass(now, bbox)
+                            passes[cam].append(p)
+                        cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+                        on_vehicle = regions is not None or any(v[0] <= cx <= v[2] and v[1] <= cy <= v[3] for v in vehicles)
+                        p.add(bbox, raw, score, frame, now, on_vehicle)
+                        if plate is None or score < MIN_SCORE:
+                            continue
+                        t = next((t for t in tracks[cam] if t.matches(plate, bbox)), None)
+                        if t is None:
+                            t = Track(now)
+                            tracks[cam].append(t)
+                        if t not in p.tracks:
+                            p.tracks.append(t)
+                        improved = t.add(plate, score, bbox, raw, frame, now)
+                        if t.sighting_id is None and t.reads >= VOTES:
+                            frame_img = confirm(conn, cam, t, now)
+                            if frame_img and plate_key(t.plate) in watch_plates:
+                                policy.send(cam, "watch", ("watch", cam, plate_key(t.plate)), now,
+                                            f"🚗 {t.plate} – {camera_names.get(cam, cam)}\n{clock(now)}", IMAGES_DIR / frame_img)
+                        elif t.sighting_id is not None and improved:
+                            update_images(conn, cam, t)
                 if dets is not None:
-                    parked.update(cam, dets, tracks, conn, now)
-                regions = None
-                if dets is not None and now - last_full_scan[cam] < FULL_SCAN_EVERY:
-                    regions = scan_regions(scanned[cam], dets, frame, now, parked.regions(cam, frame.shape))
-                else:
-                    last_full_scan[cam] = now
-                reads = reader.read(frame, regions) if regions is None or regions else []
-                # khung quét cả hình: biển vẫn tính là nằm trên xe nếu tâm biển ở trong vùng quanh một xe,
-                # nếu không xe chạy nhanh chỉ kịp đọc 1 khung đúng lúc này sẽ bị bỏ qua
-                vehicles = vehicle_regions(dets, frame.shape) if regions is None and dets else []
-                for plate, score, bbox, raw in reads:
-                    if parked.covers(cam, bbox):
-                        continue
-                    p = next((p for p in passes[cam] if p.near(bbox, now)), None)
-                    if p is None:
-                        p = PlatePass(now, bbox)
-                        passes[cam].append(p)
-                    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
-                    on_vehicle = regions is not None or any(v[0] <= cx <= v[2] and v[1] <= cy <= v[3] for v in vehicles)
-                    p.add(bbox, raw, score, frame, now, on_vehicle)
-                    if plate is None or score < MIN_SCORE:
-                        continue
-                    t = next((t for t in tracks[cam] if t.matches(plate, bbox)), None)
-                    if t is None:
-                        t = Track(now)
-                        tracks[cam].append(t)
-                    if t not in p.tracks:
-                        p.tracks.append(t)
-                    improved = t.add(plate, score, bbox, raw, frame, now)
-                    if t.sighting_id is None and t.reads >= VOTES:
-                        frame_img = confirm(conn, cam, t, now)
-                        if frame_img and plate_key(t.plate) in watch_plates:
-                            policy.send(cam, "watch", ("watch", cam, plate_key(t.plate)), now,
-                                        f"🚗 {t.plate} – {camera_names.get(cam, cam)}\n{clock(now)}", IMAGES_DIR / frame_img)
-                    elif t.sighting_id is not None and improved:
-                        update_images(conn, cam, t)
-            if dets is not None:
-                zones.process(cam, frame, dets, now)
-                recognized = face_monitor.process(cam, frame, dets, now) if cam in face_cams else []
-                if cam in track_cams:
-                    visits.process(cam, frame, dets, now)
-                    for pbox, pid in recognized:
-                        visits.link(cam, pbox, pid)
+                    zones.process(cam, frame, dets, now)
+                    recognized = face_monitor.process(cam, frame, dets, now) if cam in face_cams else []
+                    if cam in track_cams:
+                        visits.process(cam, frame, dets, now)
+                        for pbox, pid in recognized:
+                            visits.link(cam, pbox, pid)
 
-        now = time.time()
-        # lần biển đi qua mà không xác nhận được biển nào: lưu ảnh để AI đọc
-        for cam, items in passes.items():
-            for p in list(items):
-                gone = now - p.last_seen > PlatePass.GAP
-                if not p.saved and not p.confirmed and p.worth_reading and (gone or now - p.start > PlatePass.PARKED):
-                    save_candidate(conn, cam, p)
-                if gone:
-                    items.remove(p)
-                elif p.confirmed or p.saved:
-                    p.best = None  # không cần giữ frame trong RAM nữa
+            now = time.time()
+            # lần biển đi qua mà không xác nhận được biển nào: lưu ảnh để AI đọc
+            for cam, items in passes.items():
+                for p in list(items):
+                    gone = now - p.last_seen > PlatePass.GAP
+                    if not p.saved and not p.confirmed and p.worth_reading and (gone or now - p.start > PlatePass.PARKED):
+                        save_candidate(conn, cam, p)
+                    if gone:
+                        items.remove(p)
+                    elif p.confirmed or p.saved:
+                        p.best = None  # không cần giữ frame trong RAM nữa
 
-        # ghi last_seen / biển (theo đa số) định kỳ, đóng các track đã mất dấu
-        for cam, items in tracks.items():
-            for t in list(items):
-                confirmed = t.sighting_id is not None
-                expired = now - t.last_seen > (SIGHTING_GAP if confirmed else VOTE_WINDOW)
-                if confirmed and (expired or now - t.flushed_at > 5):
-                    conn.execute("UPDATE sightings SET last_seen = ?, reads = ?, plate = ? WHERE id = ?",
-                                 (t.last_seen, t.reads, t.plate, t.sighting_id))
-                    t.flushed_at = now
-                if expired:
-                    items.remove(t)
-                elif confirmed:
-                    t.best = (t.best[0], None, t.best[2], t.best[3])  # đã lưu ảnh, không giữ frame trong RAM
-        conn.commit()
-
-        if now >= next_status:
-            for cam, g in grabbers.items():
-                conn.execute(
-                    "INSERT INTO camera_status(camera, connected, last_frame_at, fps, motion, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?)"
-                    " ON CONFLICT(camera) DO UPDATE SET connected = excluded.connected,"
-                    " last_frame_at = excluded.last_frame_at, fps = excluded.fps, motion = excluded.motion,"
-                    " updated_at = excluded.updated_at",
-                    (cam, int(g.connected), g.last_frame_at, fps_counter[cam] / 10, gates[cam].take_ratio(), now),
-                )
-            fps_counter.clear()
+            # ghi last_seen / biển (theo đa số) định kỳ, đóng các track đã mất dấu
+            for cam, items in tracks.items():
+                for t in list(items):
+                    confirmed = t.sighting_id is not None
+                    expired = now - t.last_seen > (SIGHTING_GAP if confirmed else VOTE_WINDOW)
+                    if confirmed and (expired or now - t.flushed_at > 5):
+                        conn.execute("UPDATE sightings SET last_seen = ?, reads = ?, plate = ? WHERE id = ?",
+                                     (t.last_seen, t.reads, t.plate, t.sighting_id))
+                        t.flushed_at = now
+                    if expired:
+                        items.remove(t)
+                    elif confirmed:
+                        t.best = (t.best[0], None, t.best[2], t.best[3])  # đã lưu ảnh, không giữ frame trong RAM
             conn.commit()
-            for cam in watchdog.check({c: g for c, g in grabbers.items() if c in p2p_cams}, p2p_cams, now):
-                grabbers[cam].running = False  # kết nối cũ còn treo ở luồng cũ trong go2rtc
-                grabbers[cam] = StreamGrabber(cam, f"rtsp://{RTSP_HOST}/{cam}")
-                grabbers[cam].start()
-            next_status = now + 10
 
-        if now >= next_cleanup and not (cleaner and cleaner.is_alive()):
-            cleaner = cleanup_in_background()
-            next_cleanup = now + 3600
+            if now >= next_status:
+                for cam, g in grabbers.items():
+                    conn.execute(
+                        "INSERT INTO camera_status(camera, connected, last_frame_at, fps, motion, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?)"
+                        " ON CONFLICT(camera) DO UPDATE SET connected = excluded.connected,"
+                        " last_frame_at = excluded.last_frame_at, fps = excluded.fps, motion = excluded.motion,"
+                        " updated_at = excluded.updated_at",
+                        (cam, int(g.connected), g.last_frame_at, fps_counter[cam] / 10, gates[cam].take_ratio(), now),
+                    )
+                fps_counter.clear()
+                conn.commit()
+                for cam in watchdog.check({c: g for c, g in grabbers.items() if c in p2p_cams}, p2p_cams, now):
+                    grabbers[cam].running = False  # kết nối cũ còn treo ở luồng cũ trong go2rtc
+                    grabbers[cam] = StreamGrabber(cam, f"rtsp://{RTSP_HOST}/{cam}")
+                    grabbers[cam].start()
+                next_status = now + 10
 
-        time.sleep(max(0.0, INTERVAL - (time.time() - loop_start)))
+            if now >= next_cleanup and not (cleaner and cleaner.is_alive()):
+                cleaner = cleanup_in_background()
+                next_cleanup = now + 3600
+
+            time.sleep(max(0.0, INTERVAL - (time.time() - loop_start)))
+        except sqlite3.OperationalError as e:
+            # web / AI / dọn dữ liệu giữ khoá ghi quá busy_timeout (30 s): bỏ vòng này, đừng làm sập cả worker
+            if "locked" not in str(e):
+                raise
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            print(f"{datetime.now():%H:%M:%S}  DB đang bị khoá, bỏ qua một vòng ({e})", flush=True)
+            time.sleep(1)
 
 
 if __name__ == "__main__":
